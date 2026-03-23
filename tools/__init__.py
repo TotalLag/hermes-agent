@@ -6,7 +6,7 @@ This package contains all the specific tool implementations for the Hermes Agent
 Each module provides specialized functionality for different capabilities:
 
 - web_tools: Web search, content extraction, and crawling
-- terminal_tool: Command execution (local/docker/modal/daytona/ssh/singularity backends)
+- terminal_tool: Command execution using mini-swe-agent (local/docker/modal/daytona backends)
 - vision_tools: Image analysis and understanding
 - mixture_of_agents_tool: Multi-model collaborative reasoning
 - image_generation_tool: Text-to-image generation with upscaling
@@ -20,10 +20,10 @@ from .web_tools import (
     web_search_tool,
     web_extract_tool,
     web_crawl_tool,
-    check_firecrawl_api_key
+    check_firecrawl_api_key,
 )
 
-# Primary terminal tool (local/docker/singularity/modal/daytona/ssh)
+# Primary terminal tool (mini-swe-agent backend: local/docker/singularity/modal/daytona)
 from .terminal_tool import (
     terminal_tool,
     check_terminal_requirements,
@@ -32,35 +32,29 @@ from .terminal_tool import (
     get_active_environments_info,
     register_task_env_overrides,
     clear_task_env_overrides,
-    TERMINAL_TOOL_DESCRIPTION
+    TERMINAL_TOOL_DESCRIPTION,
 )
 
-from .vision_tools import (
-    vision_analyze_tool,
-    check_vision_requirements
-)
+from .vision_tools import vision_analyze_tool, check_vision_requirements
 
-from .mixture_of_agents_tool import (
-    mixture_of_agents_tool,
-    check_moa_requirements
-)
+from .mixture_of_agents_tool import mixture_of_agents_tool, check_moa_requirements
 
 from .image_generation_tool import (
     image_generate_tool,
-    check_image_generation_requirements
+    check_image_generation_requirements,
 )
 
 from .skills_tool import (
     skills_list,
     skill_view,
     check_skills_requirements,
-    SKILLS_TOOL_DESCRIPTION
+    SKILLS_TOOL_DESCRIPTION,
 )
 
 from .skill_manager_tool import (
     skill_manage,
     check_skill_manage_requirements,
-    SKILL_MANAGE_SCHEMA
+    SKILL_MANAGE_SCHEMA,
 )
 
 # Browser automation tools (agent-browser + Browserbase)
@@ -79,7 +73,7 @@ from .browser_tool import (
     cleanup_all_browsers,
     get_active_browser_sessions,
     check_browser_requirements,
-    BROWSER_TOOL_SCHEMAS
+    BROWSER_TOOL_SCHEMAS,
 )
 
 # Cronjob management tools (CLI-only, hermes-cli toolset)
@@ -140,6 +134,19 @@ from .clarify_tool import (
     CLARIFY_SCHEMA,
 )
 
+# hiclaw Manager tool (worker/task management for hiclaw integration)
+try:
+    from .hiclaw_manager_tool import (
+        hiclaw_list_workers,
+        hiclaw_get_worker,
+        hiclaw_get_manager_state,
+        hiclaw_list_tasks,
+        check_hiclaw_requirements,
+        HICLAW_MANAGER_SCHEMA,
+    )
+except ImportError:
+    pass
+
 # Code execution sandbox (programmatic tool calling)
 from .code_execution_tool import (
     execute_code,
@@ -154,109 +161,111 @@ from .delegate_tool import (
     DELEGATE_TASK_SCHEMA,
 )
 
+
 # File tools have no external requirements - they use the terminal backend
 def check_file_requirements():
     """File tools only require terminal backend to be available."""
     from .terminal_tool import check_terminal_requirements
+
     return check_terminal_requirements()
+
 
 __all__ = [
     # Web tools
-    'web_search_tool',
-    'web_extract_tool',
-    'web_crawl_tool',
-    'check_firecrawl_api_key',
-    # Terminal tools
-    'terminal_tool',
-    'check_terminal_requirements',
-    'cleanup_vm',
-    'cleanup_all_environments',
-    'get_active_environments_info',
-    'register_task_env_overrides',
-    'clear_task_env_overrides',
-    'TERMINAL_TOOL_DESCRIPTION',
+    "web_search_tool",
+    "web_extract_tool",
+    "web_crawl_tool",
+    "check_firecrawl_api_key",
+    # Terminal tools (mini-swe-agent backend)
+    "terminal_tool",
+    "check_terminal_requirements",
+    "cleanup_vm",
+    "cleanup_all_environments",
+    "get_active_environments_info",
+    "register_task_env_overrides",
+    "clear_task_env_overrides",
+    "TERMINAL_TOOL_DESCRIPTION",
     # Vision tools
-    'vision_analyze_tool',
-    'check_vision_requirements',
+    "vision_analyze_tool",
+    "check_vision_requirements",
     # MoA tools
-    'mixture_of_agents_tool',
-    'check_moa_requirements',
+    "mixture_of_agents_tool",
+    "check_moa_requirements",
     # Image generation tools
-    'image_generate_tool',
-    'check_image_generation_requirements',
+    "image_generate_tool",
+    "check_image_generation_requirements",
     # Skills tools
-    'skills_list',
-    'skill_view',
-    'check_skills_requirements',
-    'SKILLS_TOOL_DESCRIPTION',
+    "skills_list",
+    "skill_view",
+    "check_skills_requirements",
+    "SKILLS_TOOL_DESCRIPTION",
     # Skill management
-    'skill_manage',
-    'check_skill_manage_requirements',
-    'SKILL_MANAGE_SCHEMA',
+    "skill_manage",
+    "check_skill_manage_requirements",
+    "SKILL_MANAGE_SCHEMA",
     # Browser automation tools
-    'browser_navigate',
-    'browser_snapshot',
-    'browser_click',
-    'browser_type',
-    'browser_scroll',
-    'browser_back',
-    'browser_press',
-    'browser_close',
-    'browser_get_images',
-    'browser_vision',
-    'cleanup_browser',
-    'cleanup_all_browsers',
-    'get_active_browser_sessions',
-    'check_browser_requirements',
-    'BROWSER_TOOL_SCHEMAS',
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_scroll",
+    "browser_back",
+    "browser_press",
+    "browser_close",
+    "browser_get_images",
+    "browser_vision",
+    "cleanup_browser",
+    "cleanup_all_browsers",
+    "get_active_browser_sessions",
+    "check_browser_requirements",
+    "BROWSER_TOOL_SCHEMAS",
     # Cronjob management tools (CLI-only)
-    'cronjob',
-    'schedule_cronjob',
-    'list_cronjobs',
-    'remove_cronjob',
-    'check_cronjob_requirements',
-    'get_cronjob_tool_definitions',
-    'CRONJOB_SCHEMA',
+    "cronjob",
+    "schedule_cronjob",
+    "list_cronjobs",
+    "remove_cronjob",
+    "check_cronjob_requirements",
+    "get_cronjob_tool_definitions",
+    "CRONJOB_SCHEMA",
     # RL Training tools
-    'rl_list_environments',
-    'rl_select_environment',
-    'rl_get_current_config',
-    'rl_edit_config',
-    'rl_start_training',
-    'rl_check_status',
-    'rl_stop_training',
-    'rl_get_results',
-    'rl_list_runs',
-    'rl_test_inference',
-    'check_rl_api_keys',
-    'get_missing_keys',
+    "rl_list_environments",
+    "rl_select_environment",
+    "rl_get_current_config",
+    "rl_edit_config",
+    "rl_start_training",
+    "rl_check_status",
+    "rl_stop_training",
+    "rl_get_results",
+    "rl_list_runs",
+    "rl_test_inference",
+    "check_rl_api_keys",
+    "get_missing_keys",
     # File manipulation tools
-    'read_file_tool',
-    'write_file_tool',
-    'patch_tool',
-    'search_tool',
-    'get_file_tools',
-    'clear_file_ops_cache',
-    'check_file_requirements',
+    "read_file_tool",
+    "write_file_tool",
+    "patch_tool",
+    "search_tool",
+    "get_file_tools",
+    "clear_file_ops_cache",
+    "check_file_requirements",
     # Text-to-speech tools
-    'text_to_speech_tool',
-    'check_tts_requirements',
+    "text_to_speech_tool",
+    "check_tts_requirements",
     # Planning & task management tool
-    'todo_tool',
-    'check_todo_requirements',
-    'TODO_SCHEMA',
-    'TodoStore',
+    "todo_tool",
+    "check_todo_requirements",
+    "TODO_SCHEMA",
+    "TodoStore",
     # Clarifying questions tool
-    'clarify_tool',
-    'check_clarify_requirements',
-    'CLARIFY_SCHEMA',
+    "clarify_tool",
+    "check_clarify_requirements",
+    "CLARIFY_SCHEMA",
     # Code execution sandbox
-    'execute_code',
-    'check_sandbox_requirements',
-    'EXECUTE_CODE_SCHEMA',
+    "execute_code",
+    "check_sandbox_requirements",
+    "EXECUTE_CODE_SCHEMA",
     # Subagent delegation
-    'delegate_task',
-    'check_delegate_requirements',
-    'DELEGATE_TASK_SCHEMA',
+    "delegate_task",
+    "check_delegate_requirements",
+    "DELEGATE_TASK_SCHEMA",
 ]
-
