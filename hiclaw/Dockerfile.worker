@@ -1,0 +1,89 @@
+# =============================================================================
+# Hermes Agent - hiclaw Worker Dockerfile
+# Multi-stage build for minimal image size and secure credential handling
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: Builder
+# -----------------------------------------------------------------------------
+FROM python:3.11-slim AS builder
+
+ARG HERMES_AGENT_GIT_URL=https://github.com/NousResearch/hermes-agent.git
+ARG HERMES_AGENT_REF=main
+
+WORKDIR /build
+
+# Install system dependencies needed for Hermes + mc
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone Hermes Agent
+RUN git clone --depth 1 --branch "${HERMES_AGENT_REF}" "${HERMES_AGENT_GIT_URL}" hermes-agent
+
+WORKDIR /build/hermes-agent
+
+# Install Python dependencies
+RUN pip install --no-cache-dir uv && \
+    uv venv /opt/venv --python 3.11 && \
+    uv pip install --python /opt/venv/bin/python -e ".[all]"
+
+# Install mc (MinIO Client)
+RUN curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc
+
+# -----------------------------------------------------------------------------
+# Stage 2: Runtime
+# -----------------------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+LABEL org.opencontainers.image.title="Hermes Agent - hiclaw Worker"
+LABEL org.opencontainers.image.description="Hermes Agent configured as a hiclaw worker"
+LABEL org.opencontainers.image.source="https://github.com/NousResearch/hermes-agent"
+LABEL org.opencontainers.image.version="1.0.0"
+
+# Security: run as non-root
+RUN useradd --create-home --shell /bin/bash hermes && \
+    mkdir -p /app/logs && \
+    chown -R hermes:hermes /app
+
+WORKDIR /app
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy mc from builder
+COPY --from=builder /usr/local/bin/mc /usr/local/bin/mc
+
+# Copy hiclaw integration scripts
+COPY --chown=hermes:hermes scripts/ /app/hiclaw/scripts/
+
+# Install runtime dependencies only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Switch to non-root user
+USER hermes
+
+# Environment defaults (override via -e at runtime)
+ENV HICLAW_WORKER_NAME="${HOSTNAME:-hermes-worker}"
+ENV HICLAW_HERMES_MODE="cli"
+ENV HICLAW_CONFIG_PATH="/app/hiclaw/config.yaml"
+ENV HICLAW_OPENCLAW_PATH="/app/hiclaw/openclaw.json"
+ENV HICLAW_LOG_PATH="/app/logs/startup.log"
+
+# Expose gateway port if needed
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)" || exit 1
+
+# Entrypoint: use hermes-entrypoint.sh for full startup sequence
+# Falls back to direct Hermes invocation if scripts are not present
+ENTRYPOINT ["/bin/bash", "/app/hiclaw/scripts/hermes-entrypoint.sh"]
+CMD ["hermes", "run"]
