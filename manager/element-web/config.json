@@ -1,0 +1,10 @@
+{
+    "default_server_config": {
+        "m.homeserver": {
+            "base_url": "http://matrix-local.hiclaw.io:18080"
+        }
+    },
+    "brand": "Element",
+    "disable_guests": true,
+    "disable_custom_urls": false
+}

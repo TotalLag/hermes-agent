@@ -100,7 +100,7 @@ hermes-agent workers are **OpenClaw-compatible**: they use Matrix for worker↔m
 |------|---------|
 | Fork | `https://github.com/TotalLag/hermes-agent` (`main` branch) |
 | GHCR (read) | `ghcr.io/totallag/hermes-worker:latest` |
-| hiclaw Manager env | `/home/master/hiclaw-manager.env` |
+| hiclaw Manager env | `hiclaw-manager.env` (in the hiclaw install directory) |
 
 ### Git History (most recent first)
 
