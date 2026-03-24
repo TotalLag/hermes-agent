@@ -201,6 +201,177 @@ def hiclaw_list_tasks(status: Optional[str] = None) -> str:
     )
 
 
+def hiclaw_create_worker(
+    worker_name: str,
+    image: str = "ghcr.io/totallag/hermes-worker:latest",
+    runtime: str = "hermes",
+) -> str:
+    import os
+    import uuid
+    import requests
+
+    docker_proxy = os.environ.get(
+        "HICLAW_DOCKER_PROXY_HOST", "http://hiclaw-docker-proxy:2375"
+    )
+    matrix_domain = os.environ.get("HICLAW_MATRIX_DOMAIN", "")
+    manager_room_id = os.environ.get("HICLAW_MANAGER_ROOM_ID", "")
+    mc_host = os.environ.get("HICLAW_MC_HOST", "")
+    bucket = os.environ.get("HICLAW_BUCKET", "")
+    access_key = os.environ.get("HICLAW_ACCESS_KEY", "")
+    secret_key = os.environ.get("HICLAW_SECRET_KEY", "")
+    task_specs_prefix = os.environ.get("HICLAW_TASK_SPECS_PREFIX", "task-specs/")
+    task_results_prefix = os.environ.get("HICLAW_TASK_RESULTS_PREFIX", "task-results/")
+
+    errors = []
+    if not manager_room_id:
+        errors.append("HICLAW_MANAGER_ROOM_ID is not set")
+    if not docker_proxy:
+        errors.append("HICLAW_DOCKER_PROXY_HOST is not set")
+
+    if errors:
+        return json.dumps({"success": False, "error": "; ".join(errors)})
+
+    worker_id = f"{worker_name}-{uuid.uuid4().hex[:8]}"
+    matrix_user = f"@{worker_id}:{matrix_domain}" if matrix_domain else f"@{worker_id}"
+
+    matrix_password = uuid.uuid4().hex + uuid.uuid4().hex
+
+    if matrix_domain:
+        try:
+            reg_resp = requests.post(
+                f"https://{matrix_domain}/_matrix/client/r0/register",
+                json={
+                    "auth": {"type": "m.login.dummy"},
+                    "username": worker_id,
+                    "password": matrix_password,
+                    "device_id": f"HERMES-{worker_id[:8]}",
+                    "initial_device_display_name": f"hermes-worker/{worker_name}",
+                },
+                timeout=30,
+            )
+            if reg_resp.status_code not in (200, 201):
+                reg_data = reg_resp.json() if reg_resp.content else {}
+                if reg_resp.status_code == 401:
+                    flows = reg_data.get("flows", [])
+                    for flow in flows:
+                        if all(
+                            s.get("stage") == "m.login.dummy"
+                            for s in flow.get("stages", [])
+                        ):
+                            reg_resp = requests.post(
+                                f"https://{matrix_domain}/_matrix/client/r0/register",
+                                json={
+                                    "auth": {"type": "m.login.dummy"},
+                                    "username": worker_id,
+                                    "password": matrix_password,
+                                },
+                                timeout=30,
+                            )
+                            break
+                if reg_resp.status_code not in (200, 201):
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": f"Matrix registration failed: {reg_resp.status_code} {reg_resp.text[:200]}",
+                        }
+                    )
+            reg_data = reg_resp.json()
+            worker_token = reg_data.get("access_token", "")
+            worker_device_id = reg_data.get("device_id", f"HERMES-{worker_id[:8]}")
+        except Exception as e:
+            return json.dumps(
+                {"success": False, "error": f"Matrix registration error: {str(e)}"}
+            )
+    else:
+        worker_token = os.environ.get("HICLAW_MATRIX_ACCESS_TOKEN", "")
+        worker_device_id = f"HERMES-{worker_id[:8]}"
+
+    container_env = [
+        f"HICLAW_WORKER_NAME={worker_name}",
+        f"HICLAW_MATRIX_HOMESERVER=https://{matrix_domain}"
+        if matrix_domain
+        else "HICLAW_MATRIX_HOMESERVER=",
+        f"HICLAW_MATRIX_USER_ID={matrix_user}",
+        f"HICLAW_MATRIX_ACCESS_TOKEN={worker_token}",
+        f"HICLAW_MATRIX_DEVICE_ID={worker_device_id}",
+        f"HICLAW_MANAGER_ROOM_ID={manager_room_id}",
+        f"HICLAW_MC_HOST={mc_host}",
+        f"HICLAW_BUCKET={bucket}",
+        f"HICLAW_ACCESS_KEY={access_key}",
+        f"HICLAW_SECRET_KEY={secret_key}",
+        f"HICLAW_TASK_SPECS_PREFIX={task_specs_prefix}",
+        f"HICLAW_TASK_RESULTS_PREFIX={task_results_prefix}",
+        "HICLAW_HERMES_MODE=cli",
+        f"HERMES_WORKER_IMAGE={image}",
+    ]
+
+    try:
+        create_resp = requests.post(
+            f"{docker_proxy}/containers/create?name={worker_id}",
+            json={
+                "Image": image,
+                "Env": container_env,
+                "HostConfig": {
+                    "NetworkMode": "hiclaw",
+                    "ExtraHosts": ["host.docker.internal:host-gateway"],
+                },
+                "Labels": {
+                    "hermes.worker": "true",
+                    "hermes.worker.name": worker_name,
+                    "hermes.worker.runtime": runtime,
+                },
+            },
+            timeout=30,
+        )
+        if create_resp.status_code not in (200, 201):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Container create failed: {create_resp.status_code} {create_resp.text[:200]}",
+                }
+            )
+        container_data = create_resp.json()
+        container_id = container_data.get("Id", "")[:12]
+    except Exception as e:
+        return json.dumps(
+            {"success": False, "error": f"Container create error: {str(e)}"}
+        )
+
+    try:
+        start_resp = requests.post(
+            f"{docker_proxy}/containers/{container_id}/start",
+            timeout=30,
+        )
+        if start_resp.status_code not in (200, 204):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Container start failed: {start_resp.status_code} {start_resp.text[:200]}",
+                    "container_id": container_id,
+                }
+            )
+    except Exception as e:
+        return json.dumps(
+            {
+                "success": False,
+                "error": f"Container start error: {str(e)}",
+                "container_id": container_id,
+            }
+        )
+
+    return json.dumps(
+        {
+            "success": True,
+            "worker_id": worker_id,
+            "container_id": container_id,
+            "matrix_user_id": matrix_user,
+            "runtime": runtime,
+            "image": image,
+            "message": f"Worker '{worker_name}' ({worker_id}) created and started",
+        }
+    )
+
+
 def check_hiclaw_requirements() -> bool:
     return True
 
@@ -317,6 +488,39 @@ SYNC_STATUS_SCHEMA = {
 }
 
 
+CREATE_WORKER_SCHEMA = {
+    "name": "hiclaw_create_worker",
+    "description": (
+        "Spawn a new hermes worker container via the Docker proxy API.\n"
+        "Registers a Matrix account for the worker, creates the container with all required\n"
+        "hiclaw environment variables, and starts it. The worker self-registers with the\n"
+        "hiclaw Manager via Matrix message once it starts.\n\n"
+        "Requires: HICLAW_DOCKER_PROXY_HOST (default: http://hiclaw-docker-proxy:2375),\n"
+        "HICLAW_MANAGER_ROOM_ID, HICLAW_MATRIX_DOMAIN.\n\n"
+        "Default image: ghcr.io/totallag/hermes-worker:latest\n"
+        "Default runtime: hermes"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "worker_name": {
+                "type": "string",
+                "description": "Human-readable worker name (used as hostname prefix)",
+            },
+            "image": {
+                "type": "string",
+                "description": "Docker image to use for the worker (default: ghcr.io/totallag/hermes-worker:latest)",
+            },
+            "runtime": {
+                "type": "string",
+                "description": "Worker runtime type (default: hermes)",
+            },
+        },
+        "required": ["worker_name"],
+    },
+}
+
+
 from tools.registry import registry
 
 registry.register(
@@ -389,4 +593,17 @@ registry.register(
     handler=lambda args, **kw: hiclaw_sync_status(),
     check_fn=check_hiclaw_requirements,
     emoji="🔄",
+)
+
+registry.register(
+    name="hiclaw_create_worker",
+    toolset="hiclaw",
+    schema=CREATE_WORKER_SCHEMA,
+    handler=lambda args, **kw: hiclaw_create_worker(
+        worker_name=args.get("worker_name", ""),
+        image=args.get("image", "ghcr.io/totallag/hermes-worker:latest"),
+        runtime=args.get("runtime", "hermes"),
+    ),
+    check_fn=check_hiclaw_requirements,
+    emoji="🚀",
 )
