@@ -89,6 +89,43 @@ RUN . /opt/hermes-env/bin/activate && \
 # This layer ensures the image works even without the mount
 RUN mkdir -p /opt/hiclaw/scripts/init /opt/hiclaw/scripts/lib /opt/hiclaw/scripts/upgrade
 
+# ── hiclaw infrastructure ───────────────────────────────────────────────────
+# Copy infrastructure binaries from builder or install directly
+
+# MinIO
+COPY --from=minio/minio:latest /usr/local/bin/minio /usr/local/bin/minio
+
+# mc (MinIO client) — already present but ensure it's there
+COPY --from=minio/mc:latest /usr/bin/mc /usr/bin/mc
+
+# Tuwunel (conduwuit fork) — copy from hiclaw-manager image
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/tuwunel /usr/local/bin/tuwunel
+
+# Element Web
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /opt/element-web /opt/element-web
+
+# Higress binaries and scripts
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/start-*.sh /usr/local/bin/
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/base.sh /usr/local/bin/
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/higress-proxy-start.sh /usr/local/bin/
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/pilot-discovery /usr/local/bin/
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/higress-proxy /usr/local/bin/
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /etc/istio /etc/istio
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /opt/java /opt/java
+
+# Higress config
+COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /app /app
+
+# nginx (should already be in ubuntu)
+RUN apt-get update && apt-get install -y --no-install-recommends nginx openjdk-21-jre-headless netcat-traditional curl && rm -rf /var/lib/apt/lists/*
+
+# Create required directories
+RUN mkdir -p /data/minio /data/tuwunel /root/hiclaw-fs /root/manager-workspace /var/log/hiclaw /etc/nginx/conf.d /etc/nginx/sites-enabled
+
+# Copy hiclaw scripts (from the scripts/ directory in this repo)
+COPY manager/scripts/ /opt/hiclaw/scripts/
+RUN chmod +x /opt/hiclaw/scripts/init/*.sh /opt/hiclaw/scripts/lib/*.sh /usr/local/bin/start-*.sh 2>/dev/null || true
+
 # Environment
 ENV PATH="/opt/hermes-env/bin:$PATH"
 ENV HERMES_HOME="/root/.hermes"
@@ -105,6 +142,9 @@ COPY manager/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 # then launches hermes-agent
 COPY manager/hermes-entrypoint.sh /usr/local/bin/hermes-entrypoint.sh
 RUN chmod +x /usr/local/bin/hermes-entrypoint.sh
+
+COPY manager/run-gateway.sh /usr/local/bin/run-gateway.sh
+RUN chmod +x /usr/local/bin/run-gateway.sh
 
 # Default command — start supervisord (all infrastructure services + hermes-agent)
 ENTRYPOINT ["/usr/local/bin/hermes-entrypoint.sh"]
