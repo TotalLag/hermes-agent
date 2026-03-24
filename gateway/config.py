@@ -542,9 +542,12 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(frc, list):
                         frc = ",".join(str(v) for v in frc)
                     os.environ["DISCORD_FREE_RESPONSE_CHANNELS"] = str(frc)
-<<<<<<< HEAD
-                if "auto_thread" in discord_cfg and not os.getenv("DISCORD_AUTO_THREAD"):
-                    os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
+                if "auto_thread" in discord_cfg and not os.getenv(
+                    "DISCORD_AUTO_THREAD"
+                ):
+                    os.environ["DISCORD_AUTO_THREAD"] = str(
+                        discord_cfg["auto_thread"]
+                    ).lower()
     except Exception as e:
         logger.warning(
             "Failed to process config.yaml — falling back to .env / gateway.json values. "
@@ -552,16 +555,6 @@ def load_gateway_config() -> GatewayConfig:
             _home / "config.yaml",
             e,
         )
-=======
-                if "auto_thread" in discord_cfg and not os.getenv(
-                    "DISCORD_AUTO_THREAD"
-                ):
-                    os.environ["DISCORD_AUTO_THREAD"] = str(
-                        discord_cfg["auto_thread"]
-                    ).lower()
-    except Exception:
-        pass
->>>>>>> 1ba09e0 (feat(hiclaw): Add MinIO task spec sync to hiclaw-sync.sh)
 
     config = GatewayConfig.from_dict(gw_data)
 
