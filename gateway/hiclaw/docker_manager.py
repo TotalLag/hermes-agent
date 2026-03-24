@@ -48,7 +48,15 @@ class DockerManager:
         docker_host: str = DOCKER_HOST,
         worker_image: str = WORKER_IMAGE,
     ):
-        self._client = docker.DockerClient(base_url=docker_host)
+        try:
+            self._client = docker.DockerClient(base_url=docker_host)
+        except Exception as e:
+            logger.warning(
+                "DockerManager: failed to connect to Docker: %s. "
+                "Docker operations will be unavailable.",
+                e,
+            )
+            self._client = None
         self._worker_image = worker_image
 
     def launch_worker(
@@ -219,6 +227,8 @@ class DockerManager:
 
     def is_docker_available(self) -> bool:
         """Check if the Docker socket is accessible."""
+        if self._client is None:
+            return False
         try:
             self._client.ping()
             return True
