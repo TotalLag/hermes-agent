@@ -26,7 +26,7 @@ function readinessCheck() {
 }
 
 function createDir() {
-    sudo mkdir -p "$1"
+    mkdir -p "$1"
 }
 
 case $MODE in
