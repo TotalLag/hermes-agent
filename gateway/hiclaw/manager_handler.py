@@ -204,13 +204,90 @@ class WorkerMessageParser:
         }
 
     @staticmethod
-    def detect_message_type(content: str) -> str:
+    def parse_task_assign(content: str) -> Optional[dict]:
         """
-        Detect the type of a worker message.
+        Parse a //task-assign natural language message from Manager to Worker.
 
-        Returns one of: "registration", "status", "heartbeat",
-        "task_assign", "task_result", "unknown".
+        Format:
+          //task-assign
+          Task ID: {task_id}
+          Spec file: {path}    # optional
+          {natural language description}
+
+        Returns dict with task_id, spec_path (or None), and description.
         """
+        if content is None:
+            return None
+        stripped = content.strip()
+        if not stripped.startswith("//task-assign"):
+            return None
+        body = stripped[len("//task-assign") :].strip()
+        task_id = None
+        spec_path = None
+        remaining_lines: list[str] = []
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.lower().startswith("task id:"):
+                task_id = line.partition(":")[2].strip()
+            elif line.lower().startswith("spec file:"):
+                spec_path = line.partition(":")[2].strip()
+            else:
+                remaining_lines.append(line)
+        if not task_id:
+            return None
+        return {
+            "task_id": task_id,
+            "spec_path": spec_path,
+            "description": "\n".join(remaining_lines).strip(),
+        }
+
+    @staticmethod
+    def parse_task_result(content: str) -> Optional[dict]:
+        """
+        Parse a //task-result natural language message from Worker to Manager.
+
+        Format:
+          //task-result
+          Task ID: {task_id}
+          Status: completed | failed
+          {natural language result or error message}
+
+        Returns dict with task_id, status ("completed" or "failed"),
+        and result_text.
+        """
+        if content is None:
+            return None
+        stripped = content.strip()
+        if not stripped.startswith("//task-result"):
+            return None
+        body = stripped[len("//task-result") :].strip()
+        task_id = None
+        status = None
+        remaining_lines: list[str] = []
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.lower().startswith("task id:"):
+                task_id = line.partition(":")[2].strip()
+            elif line.lower().startswith("status:"):
+                status = line.partition(":")[2].strip().lower()
+            else:
+                remaining_lines.append(line)
+        if not task_id or not status:
+            return None
+        if status not in ("completed", "failed"):
+            return None
+        return {
+            "task_id": task_id,
+            "status": status,
+            "result_text": "\n".join(remaining_lines).strip(),
+        }
+
+    @staticmethod
+    def detect_message_type(content: str) -> str:
         if content is None:
             return "unknown"
         stripped = content.strip()
