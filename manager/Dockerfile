@@ -67,12 +67,13 @@ RUN . /opt/hermes-env/bin/activate && \
 # =============================================================================
 FROM ubuntu:22.04
 
-# Install Node.js 22 and other runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     supervisord \
-    mc \
+    nginx \
+    openjdk-21-jre-headless \
+    netcat-traditional \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy hermes-agent from builder
@@ -114,9 +115,6 @@ COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:la
 
 # Higress config
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /app /app
-
-# nginx (should already be in ubuntu)
-RUN apt-get update && apt-get install -y --no-install-recommends nginx openjdk-21-jre-headless netcat-traditional curl && rm -rf /var/lib/apt/lists/*
 
 # Create required directories
 RUN mkdir -p /data/minio /data/tuwunel /root/hiclaw-fs /root/manager-workspace /var/log/hiclaw /etc/nginx/conf.d /etc/nginx/sites-enabled
