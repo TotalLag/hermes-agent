@@ -70,7 +70,7 @@ FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
-    supervisord \
+    supervisor \
     nginx \
     openjdk-21-jre-headless \
     netcat-traditional \
