@@ -7,10 +7,11 @@ source $ROOT/base.sh
 
 set -e
 
-if [ "$ENABLE_CONSOLE_ROUTE" != "1" ]; then
+mkdir -p /opt/data/defaultConfig
+if [ "$ENABLE_CONSOLE_ROUTE" != "1" ] && [ -f /opt/data/defaultConfig/ingresses/higress-console.yaml ]; then
     rm -f /opt/data/defaultConfig/ingresses/higress-console.yaml
 fi
-cp -rn /opt/data/defaultConfig/* /data
+cp -rn /opt/data/defaultConfig/* /data/ 2>/dev/null || true
 
 if [ -n "$CONFIG_TEMPLATE" ]; then
     TEMPLATE_SCRIPT="$ROOT/config-template/$CONFIG_TEMPLATE.sh"

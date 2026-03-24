@@ -74,11 +74,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx \
     openjdk-21-jre-headless \
     netcat-traditional \
+    python3.11 \
     && rm -rf /var/lib/apt/lists/*
+
+# Install yq (yaml processor required by start-apiserver.sh)
+RUN curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.35.1/yq_linux_amd64 -o /usr/local/bin/yq && \
+    chmod +x /usr/local/bin/yq
 
 # Copy hermes-agent from builder
 COPY --from=builder /opt/hermes-env /opt/hermes-env
 COPY --from=builder /build /opt/hermes-source
+
+# Fix venv symlinks (builder used python3.11 from python:3.11-slim which differs from ubuntu22.04 path)
+RUN ln -sf /usr/bin/python3.11 /opt/hermes-env/bin/python3 && \
+    ln -sf /usr/bin/python3.11 /opt/hermes-env/bin/python
 
 # Install hermes CLI globally
 RUN . /opt/hermes-env/bin/activate && \
@@ -109,6 +118,7 @@ COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:la
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/base.sh /usr/local/bin/
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/higress-proxy-start.sh /usr/local/bin/
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/pilot-discovery /usr/local/bin/
+COPY --from=higress-registry.cn-hangzhou.cr.aliyuncs.com/higress/all-in-one:latest /usr/local/bin/apiserver /usr/local/bin/apiserver
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /etc/istio /etc/istio
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /opt/java /opt/java
 
