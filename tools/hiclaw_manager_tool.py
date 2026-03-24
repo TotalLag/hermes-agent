@@ -215,10 +215,11 @@ def hiclaw_create_worker(
     )
     matrix_domain = os.environ.get("HICLAW_MATRIX_DOMAIN", "")
     matrix_internal = os.environ.get(
-        "HICLAW_MATRIX_INTERNAL_URL", "http://127.0.0.1:6167"
+        "HICLAW_MATRIX_INTERNAL_URL", "http://hiclaw-manager:6167"
     )
     manager_room_id = os.environ.get("HICLAW_MANAGER_ROOM_ID", "")
     mc_host = os.environ.get("HICLAW_MC_HOST", "")
+    minio_host = os.environ.get("HICLAW_MINIO_HOST", "http://hiclaw-manager:9000")
     bucket = os.environ.get("HICLAW_BUCKET", "hiclaw-storage")
     access_key = os.environ.get("HICLAW_ACCESS_KEY", "")
     secret_key = os.environ.get("HICLAW_SECRET_KEY", "")
@@ -347,12 +348,13 @@ def hiclaw_create_worker(
     container_env = [
         f"HICLAW_WORKER_NAME={worker_name}",
         f"HICLAW_MATRIX_HOMESERVER=https://{matrix_domain}",
-        f"HICLAW_MATRIX_INTERNAL_URL={matrix_internal if matrix_internal else f'http://127.0.0.1:6167'}",
+        f"HICLAW_MATRIX_INTERNAL_URL={matrix_internal if matrix_internal else f'http://hiclaw-manager:6167'}",
         f"HICLAW_MATRIX_USER_ID={matrix_user}",
         f"HICLAW_MATRIX_ACCESS_TOKEN={worker_token}",
         f"HICLAW_MATRIX_DEVICE_ID={worker_device_id}",
         f"HICLAW_MANAGER_ROOM_ID={manager_room_id}",
         f"HICLAW_MC_HOST={mc_host}",
+        f"HICLAW_MINIO_HOST={minio_host}",
         f"HICLAW_BUCKET={storage_bucket}",
         f"HICLAW_ACCESS_KEY={access_key}",
         f"HICLAW_SECRET_KEY={secret_key}",
