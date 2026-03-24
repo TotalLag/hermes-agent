@@ -59,7 +59,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY --from=builder /usr/local/bin/mc /usr/local/bin/mc
 
 # Copy hiclaw integration scripts
-COPY --chown=hermes:hermes scripts/ /app/hiclaw/scripts/
+COPY --chown=hermes:hermes hiclaw/scripts/ /app/hiclaw/scripts/
 
 # Install runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -70,7 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 USER hermes
 
 # Environment defaults (override via -e at runtime)
-ENV HICLAW_WORKER_NAME="${HOSTNAME:-hermes-worker}"
+ENV HICLAW_WORKER_NAME="hermes-worker"
 ENV HICLAW_HERMES_MODE="cli"
 ENV HICLAW_CONFIG_PATH="/app/hiclaw/config.yaml"
 ENV HICLAW_OPENCLAW_PATH="/app/hiclaw/openclaw.json"
