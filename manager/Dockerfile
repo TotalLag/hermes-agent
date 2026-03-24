@@ -109,7 +109,6 @@ COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:la
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/base.sh /usr/local/bin/
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/higress-proxy-start.sh /usr/local/bin/
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/pilot-discovery /usr/local/bin/
-COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /usr/local/bin/higress-proxy /usr/local/bin/
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /etc/istio /etc/istio
 COPY --from=higress-registry.us-west-1.cr.aliyuncs.com/higress/hiclaw-manager:latest /opt/java /opt/java
 
