@@ -1,7 +1,5 @@
 #!/bin/bash
-# =============================================================================
 # hermes-entrypoint.sh - Container Startup for Hermes hiclaw Worker
-# =============================================================================
 
 set -euo pipefail
 
@@ -36,6 +34,22 @@ configure_matrix_session() {
     log "Matrix session configured"
 }
 
+register_worker() {
+    if [[ -z "${HICLAW_MANAGER_ROOM_ID:-}" ]]; then
+        log "WARN: HICLAW_MANAGER_ROOM_ID not set, skipping registration"
+        return 0
+    fi
+    
+    log "Registering worker with Manager..."
+    
+    if bash "${SCRIPT_DIR}/create-hermes-worker.sh" register; then
+        log "Worker registered successfully"
+    else
+        log_error "Worker registration failed"
+        return 1
+    fi
+}
+
 pull_config() {
     if [[ -z "${HICLAW_MC_HOST:-}" ]] || [[ -z "${HICLAW_BUCKET:-}" ]]; then
         log "WARN: MinIO not configured, skipping config pull"
@@ -49,10 +63,12 @@ pull_config() {
     
     log "Pulling config from MinIO (${remote_path})..."
     
-    (
-        source "${SCRIPT_DIR}/hiclaw-sync.sh"
-        cmd_pull "${remote_path}" "${SCRIPT_DIR}/"
-    ) && log "Config pulled successfully" || log "WARN: Config not found in MinIO (${remote_path}), using defaults"
+    export MC_HOST_hiclaw="${HICLAW_MC_HOST}"
+    if mc cp -r "hiclaw/${HICLAW_BUCKET}/${remote_path}" "${SCRIPT_DIR}/"; then
+        log "Config pulled successfully"
+    else
+        log "WARN: Config not found in MinIO (${remote_path}), using defaults"
+    fi
 }
 
 transform_config() {
@@ -75,33 +91,13 @@ transform_config() {
     fi
 }
 
-matrix_login() {
-    if [[ -z "${HICLAW_MATRIX_ACCESS_TOKEN:-}" ]]; then
-        log "WARN: No Matrix access token, skipping Matrix login"
-        return 0
-    fi
+launch_gateway() {
+    local gateway_cmd="${HICLAW_HERMES_GATEWAY_CMD:-hermes gateway run}"
     
-    log "Matrix access token available"
-}
-
-launch_hermes() {
-    local mode="${HICLAW_HERMES_MODE:-cli}"
-    local config_path="${HICLAW_CONFIG_PATH:-${SCRIPT_DIR}/config.yaml}"
+    log "Starting gateway: ${gateway_cmd}"
+    log "Worker will receive task assignments via Matrix and execute them using AIAgent"
     
-    log "Launching Hermes in ${mode} mode..."
-    
-    case "${mode}" in
-        gateway)
-            local gateway_cmd="${HICLAW_HERMES_GATEWAY_CMD:-hermes gateway start}"
-            log "Starting gateway: ${gateway_cmd}"
-            eval "${gateway_cmd}"
-            ;;
-        cli|*)
-            local cli_cmd="${HICLAW_HERMES_CLI_CMD:-hermes run}"
-            log "Starting CLI: ${cli_cmd}"
-            eval "${cli_cmd}"
-            ;;
-    esac
+    eval "${gateway_cmd}"
 }
 
 exponential_backoff() {
@@ -120,13 +116,13 @@ main() {
     
     configure_matrix_session
     
-    local max_retries="${HICLAW_MAX_RETRIES:-5}"
+    local max_retries="${HICLAW_MAX_RETRIES:-10}"
     local attempt=0
     
     while [[ ${attempt} -lt ${max_retries} ]]; do
-        if pull_config && transform_config && matrix_login; then
-            if launch_hermes; then
-                log "Hermes exited normally"
+        if pull_config && transform_config && register_worker; then
+            if launch_gateway; then
+                log "Gateway exited normally"
                 exit 0
             fi
         fi

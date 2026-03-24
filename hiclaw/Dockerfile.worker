@@ -28,7 +28,7 @@ WORKDIR /build/hermes-agent
 # Install Python dependencies
 RUN pip install --no-cache-dir uv && \
     uv venv /opt/venv --python 3.11 && \
-    uv pip install --python /opt/venv/bin/python -e ".[all]"
+    uv pip install --python /opt/venv/bin/python ".[all]"
 
 # Install mc (MinIO Client)
 RUN curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && \
