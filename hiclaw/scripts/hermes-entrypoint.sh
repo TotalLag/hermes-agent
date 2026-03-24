@@ -66,7 +66,10 @@ pull_config() {
     
     log "Pulling config from MinIO (${remote_path})..."
     
-    mc alias set hiclaw http://minio:9000 "${HICLAW_ACCESS_KEY}" "${HICLAW_SECRET_KEY}" 2>/dev/null || true
+    local minio_host="${HICLAW_MINIO_HOST:-http://hiclaw-manager:9000}"
+    minio_host="${minio_host#http://}"
+    minio_host="${minio_host#https://}"
+    mc alias set hiclaw "http://${minio_host}" "${HICLAW_ACCESS_KEY}" "${HICLAW_SECRET_KEY}" 2>/dev/null || true
     
     if mc cp -r "hiclaw/${bucket}/${remote_path}" "${SCRIPT_DIR}/"; then
         log "Config pulled successfully"
