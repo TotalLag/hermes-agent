@@ -1,0 +1,81 @@
+# =============================================================================
+# hermes-agent HiClaw Manager
+# =============================================================================
+# Manager container — runs hermes-agent with hiclaw-manager skill + MinIO MCP.
+# Manages workers, dispatches tasks via Matrix DMs, and tracks state in MinIO.
+#
+# Required env vars:
+#   MATRIX_HOMESERVER         Matrix homeserver URL (e.g. https://matrix.example.org)
+#   MATRIX_ACCESS_TOKEN       Matrix access token for manager bot
+#   HICLAW_ADMIN_USER         Admin Matrix user ID
+#   HICLAW_ADMIN_PASSWORD     Admin Matrix password
+#   HICLAW_MANAGER_MXID      Manager's Matrix user ID
+#   HICLAW_MANAGER_PASSWORD  Manager's Matrix password
+#   HICLAW_LLM_API_KEY      LLM API key
+#   HICLAW_LLM_PROVIDER      LLM provider (e.g. openai-compat)
+#   HICLAW_OPENAI_BASE_URL  OpenAI-compatible base URL
+#   HICLAW_DEFAULT_MODEL     Default model name
+#   HICLAW_MINIO_ENDPOINT   MinIO endpoint (e.g. minio:9000)
+#   HICLAW_MINIO_ACCESS_KEY MinIO access key
+#   HICLAW_MINIO_SECRET_KEY MinIO secret key
+#   HICLAW_MINIO_BUCKET     MinIO bucket for task specs/results
+#   HICLAW_REGISTRATION_TOKEN Worker registration token
+#   HICLAW_WORKER_HEARTBEAT_INTERVAL  Heartbeat interval seconds (default: 120)
+#   HICLAW_MANAGER_CHECK_INTERVAL     Manager check interval seconds (default: 300)
+#   DOCKER_HOST              Docker socket (e.g. unix:///var/run/docker.sock)
+#
+# Build:
+#   docker build -f docker/Dockerfile.manager -t hermes-manager:latest .
+# =============================================================================
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    ca-certificates \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast package management
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Create venv
+RUN uv venv /opt/hermes-env --python 3.11
+ENV VIRTUAL_ENV=/opt/hermes-env
+ENV PATH="/opt/hermes-env/bin:$PATH"
+
+# Install hermes-agent core + messaging + MCP + MinIO + docker-py
+COPY pyproject.toml /tmp/
+RUN uv pip install --no-cache-dir \
+    ".[messaging,mcp]" \
+    minio \
+    docker
+
+# Install hermes-agent from local source (editable)
+COPY . /app
+RUN uv pip install --no-cache-dir -e /app
+
+# Install hermes CLI globally
+RUN ln -s /opt/hermes-env/bin/hermes /usr/local/bin/hermes
+
+# Create hermes home and data directories
+RUN mkdir -p /root/.hermes/hiclaw
+
+# Expose Matrix gateway port (for local development)
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -sf http://localhost:8000/health || exit 1
+
+# Run hermes-agent as manager
+# The hiclaw/manager skill handles worker registration, task dispatch, heartbeats
+CMD ["hermes", "agent", \
+     "--model", "${HICLAW_LLM_PROVIDER}:${HICLAW_DEFAULT_MODEL}", \
+     "--platform", "matrix", \
+     "--skills", "hiclaw/manager"]
