@@ -92,10 +92,9 @@ RUN mkdir -p /opt/hiclaw/scripts/init /opt/hiclaw/scripts/lib /opt/hiclaw/script
 # ── hiclaw infrastructure ───────────────────────────────────────────────────
 # Copy infrastructure binaries from builder or install directly
 
-# MinIO
-COPY --from=minio/minio:latest /usr/local/bin/minio /usr/local/bin/minio
+RUN curl -fsSL https://dl.min.io/server/minio/release/linux-amd64/minio \
+    -o /usr/local/bin/minio && chmod +x /usr/local/bin/minio
 
-# mc (MinIO client) — already present but ensure it's there
 COPY --from=minio/mc:latest /usr/bin/mc /usr/bin/mc
 
 # Tuwunel (conduwuit fork) — copy from hiclaw-manager image
