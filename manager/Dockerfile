@@ -142,6 +142,5 @@ RUN chmod +x /usr/local/bin/hermes-entrypoint.sh
 COPY manager/run-gateway.sh /usr/local/bin/run-gateway.sh
 RUN chmod +x /usr/local/bin/run-gateway.sh
 
-# Default command — start supervisord (all infrastructure services + hermes-agent)
-ENTRYPOINT ["/usr/local/bin/hermes-entrypoint.sh"]
-CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# Supervisord runs all services (infra + agent) — this is the main process
+ENTRYPOINT ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
