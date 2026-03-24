@@ -1,0 +1,169 @@
+# =============================================================================
+# HiClaw Local Development Docker Compose
+# =============================================================================
+# Brings up a complete local HiClaw stack:
+#   - MinIO (object storage for task specs/results)
+#   - Synapse (local Matrix homeserver for manager↔worker messaging)
+#   - hermes-manager (orchestrates workers and dispatches tasks)
+#   - hermes-worker-1 (task execution agent)
+#
+# Usage:
+#   cp docker/hiclaw.env.example docker/hiclaw.env
+#   # Edit docker/hiclaw.env with your API keys and Matrix credentials
+#   docker-compose -f docker/docker-compose.yml up --build
+#
+# For production, use individual Dockerfiles and configure secrets properly.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # MinIO — local object storage
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: hiclaw-minio
+    hostname: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "${HICLAW_MINIO_ACCESS_KEY:-hiclawadmin}"
+      MINIO_ROOT_PASSWORD: "${HICLAW_MINIO_SECRET_KEY:-hiclawsecretpass}"
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hiclaw-net
+
+  # ---------------------------------------------------------------------------
+  # Synapse — local Matrix homeserver
+  # ---------------------------------------------------------------------------
+  synapse:
+    build:
+      context: ./synapse
+    container_name: hiclaw-synapse
+    hostname: synapse
+    environment:
+      SYNAPSE_SERVER_NAME: "${SYNAPSE_SERVER_NAME:-hermes.local}"
+      SYNAPSE_REGISTRATION_SHARED_SECRET: "${SYNAPSE_REGISTRATION_SHARED_SECRET:-a_random_secret_for_registration}"
+    ports:
+      - "8008:8008"
+      - "8448:8448"
+    volumes:
+      - synapse-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8008/_matrix/client/versions"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hiclaw-net
+
+  # ---------------------------------------------------------------------------
+  # Hermes Manager — orchestrates workers, dispatches tasks, monitors heartbeats
+  # ---------------------------------------------------------------------------
+  hermes-manager:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.manager
+    container_name: hermes-manager
+    hostname: hermes-manager
+    environment:
+      # Matrix
+      MATRIX_HOMESERVER: "http://synapse:8008"
+      MATRIX_ACCESS_TOKEN: "${HICLAW_MANAGER_ACCESS_TOKEN}"
+      # Manager Matrix identity
+      HICLAW_MANAGER_MXID: "${HICLAW_MANAGER_MXID}"
+      HICLAW_MANAGER_PASSWORD: "${HICLAW_MANAGER_PASSWORD}"
+      # Admin (for worker registration approval)
+      HICLAW_ADMIN_USER: "${HICLAW_ADMIN_MXID}"
+      HICLAW_ADMIN_PASSWORD: "${HICLAW_ADMIN_PASSWORD}"
+      # LLM
+      HICLAW_LLM_API_KEY: "${HICLAW_LLM_API_KEY}"
+      HICLAW_LLM_PROVIDER: "${HICLAW_LLM_PROVIDER:-openai-compat}"
+      HICLAW_OPENAI_BASE_URL: "${HICLAW_OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      HICLAW_DEFAULT_MODEL: "${HICLAW_DEFAULT_MODEL:-gpt-4o}"
+      # MinIO
+      HICLAW_MINIO_ENDPOINT: "minio:9000"
+      HICLAW_MINIO_ACCESS_KEY: "${HICLAW_MINIO_ACCESS_KEY:-hiclawadmin}"
+      HICLAW_MINIO_SECRET_KEY: "${HICLAW_MINIO_SECRET_KEY:-hiclawsecretpass}"
+      HICLAW_MINIO_BUCKET: "${HICLAW_MINIO_BUCKET:-hiclaw}"
+      HICLAW_MINIO_SECURE: "false"
+      # Worker management
+      HICLAW_REGISTRATION_TOKEN: "${HICLAW_REGISTRATION_TOKEN:-changeme}"
+      HICLAW_WORKER_HEARTBEAT_INTERVAL: "${HICLAW_WORKER_HEARTBEAT_INTERVAL:-120}"
+      HICLAW_MANAGER_CHECK_INTERVAL: "${HICLAW_MANAGER_CHECK_INTERVAL:-300}"
+      HICLAW_STALE_THRESHOLD_SECONDS: "${HICLAW_STALE_THRESHOLD_SECONDS:-300}"
+      # Docker
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - manager-data:/root/.hermes/hiclaw
+    depends_on:
+      minio:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+    networks:
+      - hiclaw-net
+
+  # ---------------------------------------------------------------------------
+  # Hermes Worker — executes tasks dispatched by the manager
+  # ---------------------------------------------------------------------------
+  hermes-worker-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: hermes-worker-1
+    hostname: hermes-worker-1
+    environment:
+      # Matrix
+      MATRIX_HOMESERVER: "http://synapse:8008"
+      MATRIX_ACCESS_TOKEN: "${HICLAW_WORKER1_ACCESS_TOKEN}"
+      # Worker identity
+      HICLAW_WORKER_NAME: "worker-1"
+      HICLAW_WORKER_VERSION: "1.0.0"
+      # Manager Matrix identity (for registration DM)
+      HICLAW_MANAGER_MXID: "${HICLAW_MANAGER_MXID}"
+      # LLM
+      HICLAW_LLM_API_KEY: "${HICLAW_LLM_API_KEY}"
+      HICLAW_LLM_PROVIDER: "${HICLAW_LLM_PROVIDER:-openai-compat}"
+      HICLAW_OPENAI_BASE_URL: "${HICLAW_OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      HICLAW_DEFAULT_MODEL: "${HICLAW_DEFAULT_MODEL:-gpt-4o}"
+      # MinIO
+      HICLAW_MINIO_ENDPOINT: "minio:9000"
+      HICLAW_MINIO_ACCESS_KEY: "${HICLAW_MINIO_ACCESS_KEY:-hiclawadmin}"
+      HICLAW_MINIO_SECRET_KEY: "${HICLAW_MINIO_SECRET_KEY:-hiclawsecretpass}"
+      HICLAW_MINIO_BUCKET: "${HICLAW_MINIO_BUCKET:-hiclaw}"
+      HICLAW_MINIO_SECURE: "false"
+      # Registration
+      HICLAW_REGISTRATION_TOKEN: "${HICLAW_REGISTRATION_TOKEN:-changeme}"
+      # Docker
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - worker-data:/root/.hermes
+    depends_on:
+      minio:
+        condition: service_healthy
+      synapse:
+        condition: service_healthy
+      hermes-manager:
+        condition: service_started
+    networks:
+      - hiclaw-net
+
+volumes:
+  minio-data:
+  synapse-data:
+  manager-data:
+  worker-data:
+
+networks:
+  hiclaw-net:
+    driver: bridge
