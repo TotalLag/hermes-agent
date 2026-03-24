@@ -51,8 +51,11 @@ register_worker() {
 }
 
 pull_config() {
-    if [[ -z "${HICLAW_MC_HOST:-}" ]] || [[ -z "${HICLAW_BUCKET:-}" ]]; then
-        log "WARN: MinIO not configured, skipping config pull"
+    local bucket="${HICLAW_BUCKET:-hiclaw-storage}"
+    local prefix="${HICLAW_STORAGE_PREFIX:-agents}"
+    
+    if [[ -z "${HICLAW_ACCESS_KEY:-}" ]] || [[ -z "${HICLAW_SECRET_KEY:-}" ]]; then
+        log "WARN: MinIO credentials not configured, skipping config pull"
         return 0
     fi
     
@@ -63,8 +66,9 @@ pull_config() {
     
     log "Pulling config from MinIO (${remote_path})..."
     
-    export MC_HOST_hiclaw="${HICLAW_MC_HOST}"
-    if mc cp -r "hiclaw/${HICLAW_BUCKET}/${remote_path}" "${SCRIPT_DIR}/"; then
+    mc alias set hiclaw http://minio:9000 "${HICLAW_ACCESS_KEY}" "${HICLAW_SECRET_KEY}" 2>/dev/null || true
+    
+    if mc cp -r "hiclaw/${bucket}/${remote_path}" "${SCRIPT_DIR}/"; then
         log "Config pulled successfully"
     else
         log "WARN: Config not found in MinIO (${remote_path}), using defaults"

@@ -47,6 +47,10 @@ send_matrix_message() {
     
     local txn_id="worker_$(date +%s)_$$"
     
+    # Use HICLAW_MATRIX_INTERNAL_URL (HTTP) for API calls to avoid SSL cert issues on internal network.
+    # HICLAW_MATRIX_HOMESERVER (HTTPS) is used by the nio Matrix sync client in the gateway.
+    local api_base="${HICLAW_MATRIX_INTERNAL_URL:-${HICLAW_MATRIX_HOMESERVER}}"
+    
     curl -sf -X PUT \
         -H "Authorization: Bearer ${HICLAW_MATRIX_ACCESS_TOKEN}" \
         -H "Content-Type: application/json" \
@@ -54,7 +58,7 @@ send_matrix_message() {
             \"msgtype\": \"${msg_type}\",
             \"content\": ${content}
         }" \
-        "${HICLAW_MATRIX_HOMESERVER}/_matrix/client/r0/rooms/$(urlencode "${room_id}")/send/m.room.message/${txn_id}" \
+        "${api_base}/_matrix/client/r0/rooms/$(urlencode "${room_id}")/send/m.room.message/${txn_id}" \
         || log_error "Failed to send matrix message"
 }
 
