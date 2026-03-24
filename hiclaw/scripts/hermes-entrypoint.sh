@@ -42,14 +42,17 @@ pull_config() {
         return 0
     fi
     
-    log "Pulling config from MinIO..."
-    
-    if source "${SCRIPT_DIR}/hiclaw-sync.sh" && hiclaw-sync.sh pull openclaw.json "${SCRIPT_DIR}/"; then
-        log "Config pulled successfully"
-    else
-        log_error "Failed to pull config from MinIO"
-        return 1
+    local remote_path="openclaw.json"
+    if [[ -n "${HICLAW_WORKER_NAME:-}" ]]; then
+        remote_path="agents/${HICLAW_WORKER_NAME}/openclaw.json"
     fi
+    
+    log "Pulling config from MinIO (${remote_path})..."
+    
+    (
+        source "${SCRIPT_DIR}/hiclaw-sync.sh"
+        cmd_pull "${remote_path}" "${SCRIPT_DIR}/"
+    ) && log "Config pulled successfully" || log "WARN: Config not found in MinIO (${remote_path}), using defaults"
 }
 
 transform_config() {
