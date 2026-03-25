@@ -9,6 +9,9 @@ Environment variables:
     MATRIX_ACCESS_TOKEN     Access token (preferred auth method)
     MATRIX_USER_ID          Full user ID (@bot:server) — required for password login
     MATRIX_PASSWORD         Password (alternative to access token)
+    MATRIX_BOT_NAME         Display name for the bot (e.g. "Hermes"). If set, the
+                            bot's display name will be updated on connect. Falls
+                            back to the localpart of MATRIX_USER_ID.
     MATRIX_ENCRYPTION       Set "true" to enable E2EE
     MATRIX_ALLOWED_USERS    Comma-separated Matrix user IDs (@user:server)
     MATRIX_HOME_ROOM        Room ID for cron/notification delivery
@@ -91,6 +94,9 @@ class MatrixAdapter(BasePlatformAdapter):
             "encryption",
             os.getenv("MATRIX_ENCRYPTION", "").lower() in ("true", "1", "yes"),
         )
+        self._bot_name: str = config.extra.get(
+            "bot_name", os.getenv("MATRIX_BOT_NAME", "")
+        )
         self._require_mention: bool = config.extra.get(
             "require_mention",
             os.getenv("MATRIX_REQUIRE_MENTION", "").lower() in ("true", "1", "yes"),
@@ -114,6 +120,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
         self._processed_events: deque = deque(maxlen=1000)
         self._processed_events_set: set = set()
+        self._hiclaw_handler: Any = None
 
     def _is_duplicate_event(self, event_id) -> bool:
         """Return True if this event was already processed. Tracks the ID otherwise."""
@@ -127,6 +134,29 @@ class MatrixAdapter(BasePlatformAdapter):
         self._processed_events.append(event_id)
         self._processed_events_set.add(event_id)
         return False
+
+    def is_hiclaw_message(self, content: str) -> bool:
+        from gateway.hiclaw.manager_handler import HiClawManagerHandler
+
+        return HiClawManagerHandler.is_hiclaw_message(content)
+
+    async def _handle_hiclaw_message(
+        self, content: str, sender: str, room_id: str
+    ) -> bool:
+        if self._hiclaw_handler is None:
+            gateway = getattr(getattr(self, "_message_handler", None), "__self__", None)
+            if gateway is None:
+                logger.warning(
+                    "Matrix: hiClaw message received but no gateway handler is attached"
+                )
+                return False
+            from gateway.hiclaw.manager_handler import HiClawManagerHandler
+
+            self._hiclaw_handler = HiClawManagerHandler(gateway)
+
+        return await self._hiclaw_handler.handle_worker_message(
+            content, sender, room_id
+        )
 
     # ------------------------------------------------------------------
     # Required overrides
@@ -204,6 +234,13 @@ class MatrixAdapter(BasePlatformAdapter):
             )
             await client.close()
             return False
+
+        if self._bot_name:
+            try:
+                await client.set_displayname(self._bot_name)
+                logger.info("Matrix: display name set to %r", self._bot_name)
+            except Exception as exc:
+                logger.warning("Matrix: set_displayname failed: %s", exc)
 
         # If E2EE is enabled, load the crypto store.
         if self._encryption and hasattr(client, "olm"):
@@ -698,6 +735,13 @@ class MatrixAdapter(BasePlatformAdapter):
                     past_fallback = True
                 stripped.append(line)
             body = "\n".join(stripped) if stripped else body
+
+        if self.is_hiclaw_message(body):
+            handled = await self._handle_hiclaw_message(
+                body, event.sender, room.room_id
+            )
+            if handled:
+                return
 
         # Message type.
         msg_type = MessageType.TEXT
