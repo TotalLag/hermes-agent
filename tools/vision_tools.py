@@ -325,8 +325,9 @@ async def vision_analyze_tool(
         logger.info("Processing image with vision model...")
         
         # Call the vision API via centralized router.
-        # Read timeout from config.yaml (auxiliary.vision.timeout), default 30s.
-        vision_timeout = 30.0
+        # Read timeout from config.yaml (auxiliary.vision.timeout), default 120s.
+        # Local vision models (llama.cpp, ollama) can take well over 30s.
+        vision_timeout = 120.0
         try:
             from hermes_cli.config import load_config
             _cfg = load_config()
@@ -375,6 +376,13 @@ async def vision_analyze_tool(
         # so it can inform the user instead of a cryptic API error.
         err_str = str(e).lower()
         if any(hint in err_str for hint in (
+            "402", "insufficient", "payment required", "credits", "billing",
+        )):
+            analysis = (
+                "Insufficient credits or payment required. Please top up your "
+                f"API provider account and try again. Error: {e}"
+            )
+        elif any(hint in err_str for hint in (
             "does not support", "not support image", "invalid_request",
             "content_policy", "image_url", "multimodal",
             "unrecognized request argument", "image input",
