@@ -2,8 +2,10 @@
 """
 Task Queue MCP Server - subprocess stdio-based JSON-RPC server.
 Tracks task lifecycle: pending → assigned → running → completed / failed
-Persisted to ~/.hermes/hiclaw/task-queue.json
+Persisted to SQLite at ~/.hermes/hiclaw/task-queue.db
 """
+
+from __future__ import annotations
 
 import dataclasses
 import datetime
@@ -11,12 +13,18 @@ import enum
 import json
 import logging
 import os
+import sqlite3
 import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-# ============================================================================
-# Dataclasses & Enums
-# ============================================================================
+logger = logging.getLogger(__name__)
+
+QUEUE_DIR = os.path.expanduser("~/.hermes/hiclaw/")
+QUEUE_FILE = os.path.join(QUEUE_DIR, "task-queue.json")
+DB_PATH = os.path.join(QUEUE_DIR, "task-queue.db")
 
 
 class ManagerMode(Enum):
@@ -25,37 +33,551 @@ class ManagerMode(Enum):
     MONITORING = "monitoring"
 
 
+VALID_TRANSITIONS = {
+    "pending": {"assigned"},
+    "assigned": {"running"},
+    "running": {"completed", "failed"},
+    "completed": set(),
+    "failed": set(),
+}
+
+
 @dataclass
 class TaskInfo:
     id: str
     spec_path: str
     assigned_worker: str | None
-    status: str  # pending, assigned, running, completed, failed
-    created_at: str  # ISO timestamp
-    updated_at: str  # ISO timestamp
+    status: str
+    created_at: str
+    updated_at: str
     result_path: str | None
     error: str | None
+    started_at: str | None = None
 
 
-# ============================================================================
-# Constants
-# ============================================================================
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-QUEUE_FILE = Path.home() / ".hermes" / "hiclaw" / "task-queue.json"
 
-VALID_TRANSITIONS = {
-    "pending": ["assigned"],
-    "assigned": ["running"],
-    "running": ["completed", "failed"],
-    "completed": [],
-    "failed": [],
-}
+def _error(message: str, **extra: object) -> str:
+    payload: dict[str, object] = {"status": "error", "message": message}
+    payload.update(extra)
+    return json.dumps(payload)
+
+
+def _ok(**payload: object) -> str:
+    return json.dumps(payload)
+
+
+def _ensure_queue_dir() -> None:
+    os.makedirs(QUEUE_DIR, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# SQLite support
+# ---------------------------------------------------------------------------
+
+
+def _get_db() -> sqlite3.Connection:
+    """Return a WAL-mode SQLite connection. Creates schema if needed."""
+    _ensure_queue_dir()
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.row_factory = sqlite3.Row
+    _init_db(conn)
+    return conn
+
+
+def _init_db(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tasks (
+            id              TEXT PRIMARY KEY,
+            spec_path       TEXT NOT NULL DEFAULT '',
+            assigned_worker TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'pending',
+            result_path     TEXT NOT NULL DEFAULT '',
+            error           TEXT NOT NULL DEFAULT '',
+            started_at      TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_tasks_assigned_worker ON tasks(assigned_worker);
+        CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks(updated_at);
+        """
+    )
+
+
+# ---------------------------------------------------------------------------
+# JSON → SQLite migration
+# ---------------------------------------------------------------------------
+
+
+def _migrate_json_to_sqlite() -> int:
+    """Import existing JSON queue into SQLite. Returns count of tasks imported."""
+    if not os.path.exists(QUEUE_FILE):
+        return 0
+
+    try:
+        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0
+
+    if not isinstance(data, dict):
+        return 0
+
+    tasks = data.get("tasks", [])
+    if not isinstance(tasks, list):
+        return 0
+
+    conn = _get_db()
+    imported = 0
+    for item in tasks:
+        if not isinstance(item, dict):
+            continue
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO tasks
+                (id, spec_path, assigned_worker, status, result_path, error,
+                 started_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(item.get("id", "")),
+                    str(item.get("spec_path", "")),
+                    str(item.get("assigned_worker") or ""),
+                    str(item.get("status", "pending")),
+                    str(item.get("result_path") or ""),
+                    str(item.get("error") or ""),
+                    str(item.get("started_at") or ""),
+                    str(item.get("created_at", "")),
+                    str(item.get("updated_at", "")),
+                ),
+            )
+            if conn.total_changes > 0:
+                imported += 1
+        except Exception as exc:
+            logger.warning("Skipping invalid task during migration: %s", exc)
+
+    conn.commit()
+    conn.close()
+
+    if imported > 0:
+        bak_path = QUEUE_FILE + ".migrated"
+        os.replace(QUEUE_FILE, bak_path)
+        logger.warning(
+            "Migrated %d tasks from JSON to SQLite. Backup: %s", imported, bak_path
+        )
+
+    return imported
+
+
+# Ensure migration runs once at module load
+_migrate_json_to_sqlite()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _task_from_row(row: sqlite3.Row) -> dict:
+    """Convert a sqlite3.Row to a task dict."""
+    return {
+        "id": row["id"],
+        "spec_path": row["spec_path"],
+        "assigned_worker": row["assigned_worker"] or None,
+        "status": row["status"],
+        "result_path": row["result_path"] or None,
+        "error": row["error"] or None,
+        "started_at": row["started_at"] or None,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _task_to_dict(task: TaskInfo) -> dict:
+    """Serialize TaskInfo dataclass to dict."""
+    return {
+        "id": task.id,
+        "spec_path": task.spec_path,
+        "assigned_worker": task.assigned_worker,
+        "status": task.status,
+        "result_path": task.result_path,
+        "error": task.error,
+        "started_at": task.started_at,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+def _validate_status_transition(current: str, new: str) -> None:
+    """Raise ValueError if transition is not allowed."""
+    if current == new:
+        return  # No-op is always allowed
+    allowed = VALID_TRANSITIONS.get(current, set())
+    if new not in allowed:
+        raise ValueError(
+            f"Invalid status transition: {current} → {new}. "
+            f"Allowed from '{current}': {', '.join(sorted(allowed)) or 'none'}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
+
+
+def tq_add_task(task_id: str, spec_path: str) -> str:
+    """Add a new task in pending state."""
+    if not isinstance(task_id, str) or not task_id.strip():
+        return _error("task_id is required")
+    if not isinstance(spec_path, str) or not spec_path.strip():
+        return _error("spec_path is required")
+
+    now = _utc_now()
+    conn = _get_db()
+    try:
+        existing = conn.execute(
+            "SELECT id FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if existing is not None:
+            return _error(f"Task '{task_id}' already exists")
+
+        conn.execute(
+            """
+            INSERT INTO tasks (id, spec_path, status, created_at, updated_at)
+            VALUES (?, ?, 'pending', ?, ?)
+            """,
+            (task_id.strip(), spec_path.strip(), now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    task = TaskInfo(
+        id=task_id.strip(),
+        spec_path=spec_path.strip(),
+        assigned_worker=None,
+        status="pending",
+        created_at=now,
+        updated_at=now,
+        result_path=None,
+        error=None,
+        started_at=None,
+    )
+    return _ok(success=True, task=_task_to_dict(task))
+
+
+def tq_assign(task_id: str, worker_id: str) -> str:
+    """Assign a pending task to a worker."""
+    if not isinstance(task_id, str) or not task_id.strip():
+        return _error("task_id is required")
+    if not isinstance(worker_id, str) or not worker_id.strip():
+        return _error("worker_id is required")
+
+    now = _utc_now()
+    conn = _get_db()
+    try:
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            return _error(f"Task '{task_id}' not found")
+
+        current_status = row["status"]
+        if current_status != "pending":
+            return _error(
+                f"Cannot assign task in '{current_status}' status. Must be 'pending'"
+            )
+
+        conn.execute(
+            """
+            UPDATE tasks SET assigned_worker=?, status='assigned', updated_at=?
+            WHERE id=?
+            """,
+            (worker_id.strip(), now, task_id),
+        )
+        conn.commit()
+
+        updated_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return _ok(success=True, task=_task_from_row(updated_row))
+    finally:
+        conn.close()
+
+
+def tq_start(task_id: str) -> str:
+    """Mark an assigned task as running."""
+    if not isinstance(task_id, str) or not task_id.strip():
+        return _error("task_id is required")
+
+    now = _utc_now()
+    conn = _get_db()
+    try:
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            return _error(f"Task '{task_id}' not found")
+
+        current_status = row["status"]
+        if current_status != "assigned":
+            return _error(
+                f"Cannot start task in '{current_status}' status. Must be 'assigned'"
+            )
+
+        conn.execute(
+            """
+            UPDATE tasks SET status='running', started_at=?, updated_at=?
+            WHERE id=?
+            """,
+            (now, now, task_id),
+        )
+        conn.commit()
+
+        updated_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return _ok(success=True, task=_task_from_row(updated_row))
+    finally:
+        conn.close()
+
+
+def tq_complete(task_id: str, result_path: str) -> str:
+    """Mark a running task as completed."""
+    if not isinstance(task_id, str) or not task_id.strip():
+        return _error("task_id is required")
+    if not isinstance(result_path, str):
+        return _error("result_path is required")
+
+    now = _utc_now()
+    conn = _get_db()
+    try:
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            return _error(f"Task '{task_id}' not found")
+
+        current_status = row["status"]
+        if current_status != "running":
+            return _error(
+                f"Cannot complete task in '{current_status}' status. Must be 'running'"
+            )
+
+        conn.execute(
+            """
+            UPDATE tasks SET status='completed', result_path=?, assigned_worker='',
+                             updated_at=?
+            WHERE id=?
+            """,
+            (result_path, now, task_id),
+        )
+        conn.commit()
+
+        updated_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return _ok(success=True, task=_task_from_row(updated_row))
+    finally:
+        conn.close()
+
+
+def tq_fail(task_id: str, error: str) -> str:
+    """Mark a running task as failed."""
+    if not isinstance(task_id, str) or not task_id.strip():
+        return _error("task_id is required")
+    if not isinstance(error, str):
+        return _error("error must be a string")
+
+    now = _utc_now()
+    conn = _get_db()
+    try:
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            return _error(f"Task '{task_id}' not found")
+
+        current_status = row["status"]
+        if current_status != "running":
+            return _error(
+                f"Cannot fail task in '{current_status}' status. Must be 'running'"
+            )
+
+        conn.execute(
+            """
+            UPDATE tasks SET status='failed', error=?, assigned_worker='',
+                             updated_at=?
+            WHERE id=?
+            """,
+            (error, now, task_id),
+        )
+        conn.commit()
+
+        updated_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return _ok(success=True, task=_task_from_row(updated_row))
+    finally:
+        conn.close()
+
+
+def tq_fail_stale_tasks(timeout_seconds: int) -> str:
+    """Mark running tasks past timeout as failed with error 'Task timed out'."""
+    if not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
+        return _error("timeout_seconds must be a positive integer")
+
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+    cutoff_str = cutoff.isoformat()
+
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM tasks
+            WHERE status = 'running' AND updated_at != '' AND updated_at < ?
+            """,
+            (cutoff_str,),
+        ).fetchall()
+
+        if rows:
+            stale_ids = [row["id"] for row in rows]
+            now = _utc_now()
+            conn.executemany(
+                """
+                UPDATE tasks SET status='failed', error='Task timed out',
+                                 assigned_worker='', updated_at=?
+                WHERE id=?
+                """,
+                [(now, tid) for tid in stale_ids],
+            )
+            conn.commit()
+
+        stale_tasks = [_task_from_row(row) for row in rows]
+        return _ok(
+            status="ok",
+            count=len(stale_tasks),
+            timeout_seconds=timeout_seconds,
+            cutoff=cutoff_str,
+            tasks=stale_tasks,
+        )
+    finally:
+        conn.close()
+
+
+def tq_list(status: str | None = None) -> str:
+    """List tasks, optionally filtered by status."""
+    conn = _get_db()
+    try:
+        if status is not None and str(status).strip() != "":
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE status = ?", (status.strip(),)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM tasks").fetchall()
+
+        tasks = [_task_from_row(row) for row in rows]
+        return json.dumps({"tasks": tasks, "count": len(tasks)})
+    finally:
+        conn.close()
+
+
+def tq_get(task_id: str) -> str:
+    """Get a specific task by ID."""
+    if not isinstance(task_id, str) or not task_id.strip():
+        return _error("task_id is required")
+
+    conn = _get_db()
+    try:
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            return _error(f"Task '{task_id}' not found")
+        return json.dumps({"task": _task_from_row(row)})
+    finally:
+        conn.close()
+
+
+def tq_stats() -> str:
+    """Get task queue statistics."""
+    conn = _get_db()
+    try:
+        rows = conn.execute("SELECT status FROM tasks").fetchall()
+        tasks = [row["status"] for row in rows]
+        total = len(tasks)
+        completed = sum(1 for t in tasks if t == "completed")
+        failed = sum(1 for t in tasks if t == "failed")
+        pending = sum(1 for t in tasks if t == "pending")
+        assigned = sum(1 for t in tasks if t == "assigned")
+        running = sum(1 for t in tasks if t == "running")
+        return json.dumps(
+            {
+                "total_tasks": total,
+                "completed_tasks": completed,
+                "failed_tasks": failed,
+                "pending_tasks": pending,
+                "assigned_tasks": assigned,
+                "running_tasks": running,
+            }
+        )
+    finally:
+        conn.close()
+
+
+def tq_set_mode(mode: str) -> str:
+    """Set the manager mode (persisted to DB)."""
+    try:
+        ManagerMode(mode)
+    except ValueError:
+        return _error(
+            f"Invalid mode '{mode}'. Must be one of: idle, dispatching, monitoring"
+        )
+
+    if not isinstance(mode, str):
+        return _error("mode must be a string")
+
+    conn = _get_db()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)
+            """
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('mode', ?)",
+            (mode.strip(),),
+        )
+        conn.commit()
+        return _ok(success=True, mode=mode.strip())
+    finally:
+        conn.close()
+
+
+def tq_get_mode() -> str:
+    """Get the current manager mode."""
+    conn = _get_db()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)
+            """
+        )
+        row = conn.execute("SELECT value FROM meta WHERE key = 'mode'").fetchone()
+        mode = row["value"] if row else ManagerMode.IDLE.value
+        return json.dumps({"mode": mode})
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# MCP tool definitions
+# ---------------------------------------------------------------------------
 
 TOOL_DEFINITIONS = [
     {
         "name": "tq_add_task",
         "description": "Add a new task to the queue in pending state",
-        "inputSchema": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Unique task identifier"},
@@ -70,7 +592,7 @@ TOOL_DEFINITIONS = [
     {
         "name": "tq_assign",
         "description": "Assign a pending task to a worker",
-        "inputSchema": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Task identifier"},
@@ -82,7 +604,7 @@ TOOL_DEFINITIONS = [
     {
         "name": "tq_start",
         "description": "Mark an assigned task as running",
-        "inputSchema": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Task identifier"},
@@ -93,7 +615,7 @@ TOOL_DEFINITIONS = [
     {
         "name": "tq_complete",
         "description": "Mark a running task as completed with result path",
-        "inputSchema": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Task identifier"},
@@ -105,7 +627,7 @@ TOOL_DEFINITIONS = [
     {
         "name": "tq_fail",
         "description": "Mark a running task as failed with error message",
-        "inputSchema": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Task identifier"},
@@ -115,9 +637,26 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "tq_fail_stale_tasks",
+        "description": (
+            "Mark running tasks that have not been updated within timeout_seconds as failed. "
+            "Useful for cleaning up tasks whose workers died."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Seconds since last update to consider a running task stale.",
+                },
+            },
+            "required": ["timeout_seconds"],
+        },
+    },
+    {
         "name": "tq_list",
         "description": "List tasks, optionally filtered by status",
-        "inputSchema": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "status": {
@@ -130,7 +669,7 @@ TOOL_DEFINITIONS = [
     {
         "name": "tq_get",
         "description": "Get a specific task by ID",
-        "inputSchema": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "Task identifier"},
@@ -141,12 +680,12 @@ TOOL_DEFINITIONS = [
     {
         "name": "tq_stats",
         "description": "Get task queue statistics",
-        "inputSchema": {"type": "object", "properties": {}},
+        "input_schema": {"type": "object", "properties": {}},
     },
     {
         "name": "tq_set_mode",
         "description": "Set the manager mode",
-        "inputSchema": {
+        "input_schema": {
             "type": "object",
             "properties": {
                 "mode": {
@@ -161,286 +700,49 @@ TOOL_DEFINITIONS = [
     {
         "name": "tq_get_mode",
         "description": "Get the current manager mode",
-        "inputSchema": {"type": "object", "properties": {}},
+        "input_schema": {"type": "object", "properties": {}},
     },
 ]
 
-# ============================================================================
-# State Helpers
-# ============================================================================
 
-
-def _now_iso() -> str:
-    """Return current UTC time in ISO format."""
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-
-def _load_queue() -> dict:
-    """Load queue state from file, returns default if not exists."""
-    if not QUEUE_FILE.exists():
-        return {"tasks": [], "mode": ManagerMode.IDLE.value}
-    try:
-        with open(QUEUE_FILE) as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {"tasks": [], "mode": ManagerMode.IDLE.value}
-
-
-def _save_queue(data: dict) -> None:
-    """Atomically save queue state to file."""
-    QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_file = QUEUE_FILE.with_suffix(".tmp")
-    with open(temp_file, "w") as f:
-        json.dump(data, f, indent=2)
-    temp_file.replace(QUEUE_FILE)
-
-
-def _find_task(task_id: str) -> dict | None:
-    """Find task by ID, returns None if not found."""
-    data = _load_queue()
-    for task in data.get("tasks", []):
-        if task["id"] == task_id:
-            return task
-    return None
-
-
-def _update_task(task_id: str, updates: dict) -> dict | None:
-    """Update task fields and save, returns updated task or None if not found."""
-    data = _load_queue()
-    for i, task in enumerate(data["tasks"]):
-        if task["id"] == task_id:
-            data["tasks"][i].update(updates)
-            data["tasks"][i]["updated_at"] = _now_iso()
-            _save_queue(data)
-            return data["tasks"][i]
-    return None
-
-
-def _validate_status_transition(current: str, new: str) -> bool:
-    """Check if status transition is valid."""
-    return new in VALID_TRANSITIONS.get(current, [])
-
-
-# ============================================================================
-# Tool Handlers
-# ============================================================================
-
-TOOL_HANDLERS = {}
-
-
-def _register_handler(name: str):
-    """Decorator to register a tool handler."""
-
-    def decorator(func):
-        TOOL_HANDLERS[name] = func
-        return func
-
-    return decorator
-
-
-@_register_handler("tq_add_task")
-def tq_add_task(task_id: str, spec_path: str) -> str:
-    """Add a new task in pending state."""
-    data = _load_queue()
-    for task in data["tasks"]:
-        if task["id"] == task_id:
-            return json.dumps({"error": f"Task '{task_id}' already exists"})
-
-    now = _now_iso()
-    task = {
-        "id": task_id,
-        "spec_path": spec_path,
-        "assigned_worker": None,
-        "status": "pending",
-        "created_at": now,
-        "updated_at": now,
-        "result_path": None,
-        "error": None,
-    }
-    data["tasks"].append(task)
-    _save_queue(data)
-    return json.dumps({"success": True, "task": task})
-
-
-@_register_handler("tq_assign")
-def tq_assign(task_id: str, worker_id: str) -> str:
-    """Assign a pending task to a worker."""
-    task = _find_task(task_id)
-    if task is None:
-        return json.dumps({"error": f"Task '{task_id}' not found"})
-    if task["status"] != "pending":
-        return json.dumps(
-            {
-                "error": f"Cannot assign task in '{task['status']}' status. Must be 'pending'"
-            }
-        )
-
-    updated = _update_task(
-        task_id,
-        {
-            "assigned_worker": worker_id,
-            "status": "assigned",
-        },
-    )
-    return json.dumps({"success": True, "task": updated})
-
-
-@_register_handler("tq_start")
-def tq_start(task_id: str) -> str:
-    """Mark an assigned task as running."""
-    task = _find_task(task_id)
-    if task is None:
-        return json.dumps({"error": f"Task '{task_id}' not found"})
-    if task["status"] != "assigned":
-        return json.dumps(
-            {
-                "error": f"Cannot start task in '{task['status']}' status. Must be 'assigned'"
-            }
-        )
-
-    updated = _update_task(task_id, {"status": "running"})
-    return json.dumps({"success": True, "task": updated})
-
-
-@_register_handler("tq_complete")
-def tq_complete(task_id: str, result_path: str) -> str:
-    """Mark a running task as completed."""
-    task = _find_task(task_id)
-    if task is None:
-        return json.dumps({"error": f"Task '{task_id}' not found"})
-    if task["status"] != "running":
-        return json.dumps(
-            {
-                "error": f"Cannot complete task in '{task['status']}' status. Must be 'running'"
-            }
-        )
-
-    updated = _update_task(
-        task_id,
-        {
-            "status": "completed",
-            "result_path": result_path,
-        },
-    )
-    return json.dumps({"success": True, "task": updated})
-
-
-@_register_handler("tq_fail")
-def tq_fail(task_id: str, error: str) -> str:
-    """Mark a running task as failed."""
-    task = _find_task(task_id)
-    if task is None:
-        return json.dumps({"error": f"Task '{task_id}' not found"})
-    if task["status"] != "running":
-        return json.dumps(
-            {
-                "error": f"Cannot fail task in '{task['status']}' status. Must be 'running'"
-            }
-        )
-
-    updated = _update_task(
-        task_id,
-        {
-            "status": "failed",
-            "error": error,
-        },
-    )
-    return json.dumps({"success": True, "task": updated})
-
-
-@_register_handler("tq_list")
-def tq_list(status: str | None = None) -> str:
-    """List tasks, optionally filtered by status."""
-    data = _load_queue()
-    tasks = data.get("tasks", [])
-    if status:
-        tasks = [t for t in tasks if t["status"] == status]
-    return json.dumps({"tasks": tasks, "count": len(tasks)})
-
-
-@_register_handler("tq_get")
-def tq_get(task_id: str) -> str:
-    """Get a specific task by ID."""
-    task = _find_task(task_id)
-    if task is None:
-        return json.dumps({"error": f"Task '{task_id}' not found"})
-    return json.dumps({"task": task})
-
-
-@_register_handler("tq_stats")
-def tq_stats() -> str:
-    """Get task queue statistics."""
-    data = _load_queue()
-    tasks = data.get("tasks", [])
-    total = len(tasks)
-    completed = sum(1 for t in tasks if t["status"] == "completed")
-    failed = sum(1 for t in tasks if t["status"] == "failed")
-    pending = sum(1 for t in tasks if t["status"] == "pending")
-    assigned = sum(1 for t in tasks if t["status"] == "assigned")
-    running = sum(1 for t in tasks if t["status"] == "running")
-    return json.dumps(
-        {
-            "total_tasks": total,
-            "completed_tasks": completed,
-            "failed_tasks": failed,
-            "pending_tasks": pending,
-            "assigned_tasks": assigned,
-            "running_tasks": running,
-        }
-    )
-
-
-@_register_handler("tq_set_mode")
-def tq_set_mode(mode: str) -> str:
-    """Set the manager mode."""
-    try:
-        ManagerMode(mode)
-    except ValueError:
-        return json.dumps(
-            {
-                "error": f"Invalid mode '{mode}'. Must be one of: idle, dispatching, monitoring"
-            }
-        )
-
-    data = _load_queue()
-    data["mode"] = mode
-    _save_queue(data)
-    return json.dumps({"success": True, "mode": mode})
-
-
-@_register_handler("tq_get_mode")
-def tq_get_mode() -> str:
-    """Get the current manager mode."""
-    data = _load_queue()
-    return json.dumps({"mode": data.get("mode", ManagerMode.IDLE.value)})
-
-
-# ============================================================================
-# MCP Protocol
-# ============================================================================
+TOOL_HANDLERS = {
+    "tq_add_task": tq_add_task,
+    "tq_assign": tq_assign,
+    "tq_start": tq_start,
+    "tq_complete": tq_complete,
+    "tq_fail": tq_fail,
+    "tq_fail_stale_tasks": tq_fail_stale_tasks,
+    "tq_list": tq_list,
+    "tq_get": tq_get,
+    "tq_stats": tq_stats,
+    "tq_set_mode": tq_set_mode,
+    "tq_get_mode": tq_get_mode,
+}
 
 
 def handle_tool_call(tool_name: str, args: dict) -> str:
-    """Dispatch tool call to handler, returns JSON result string."""
     handler = TOOL_HANDLERS.get(tool_name)
     if handler is None:
-        return json.dumps({"error": f"Unknown tool: {tool_name}"})
+        return _error(f"Unknown tool: {tool_name}")
 
     try:
         return handler(**args)
-    except TypeError as e:
-        return json.dumps({"error": f"Invalid arguments for '{tool_name}': {e}"})
+    except TypeError as exc:
+        logger.warning("Invalid arguments for %s: %s", tool_name, exc)
+        return _error(f"Invalid arguments for {tool_name}: {exc}")
+    except Exception as exc:
+        logger.exception("Tool %s raised: %s", tool_name, exc)
+        return _error(str(exc))
 
 
-def write_json(obj: dict) -> None:
-    """Write JSON response to stdout."""
+def write_json(obj):
     print(json.dumps(obj), flush=True)
 
 
-def main() -> None:
-    """Main MCP server loop."""
+def main():
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
-
+    # Prime the DB connection (runs migration) at startup
+    _get_db().close()
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -448,7 +750,6 @@ def main() -> None:
         try:
             request = json.loads(line)
             method = request.get("method", "")
-
             if method == "initialize":
                 write_json(
                     {
@@ -457,7 +758,10 @@ def main() -> None:
                         "result": {
                             "protocolVersion": "2024-11-05",
                             "capabilities": {},
-                            "serverInfo": {"name": "task-queue", "version": "1.0.0"},
+                            "serverInfo": {
+                                "name": "task-queue",
+                                "version": "1.1.0",
+                            },
                         },
                     }
                 )
