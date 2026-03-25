@@ -3,15 +3,32 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-REGISTRY_PATH = os.path.expanduser("~/.hermes/hiclaw/workers-registry.json")
+REGISTRY_DIR = os.path.expanduser("~/.hermes/hiclaw/")
+REGISTRY_PATH = os.path.join(REGISTRY_DIR, "workers-registry.json")
+DB_PATH = os.path.join(REGISTRY_DIR, "workers-registry.db")
+
 VALID_STATUSES = {"registered", "ready", "busy", "done", "error", "offline"}
+STALE_THRESHOLD_SECONDS = 300
+
+# Status transition graph: key status → set of allowed next statuses
+STATUS_TRANSITIONS = {
+    "registered": {"ready", "offline", "error"},
+    "ready": {"busy", "offline", "error"},
+    "busy": {"ready", "offline", "error"},
+    "done": {"ready", "offline", "error"},
+    "error": {"ready", "offline"},
+    "offline": {"ready", "error"},
+}
 
 
 @dataclass
@@ -26,6 +43,7 @@ class Worker:
     room_id: str = ""
     registered_at: str = ""
     last_seen_at: str = ""
+    last_status_change: str = ""
     metadata: dict = field(default_factory=dict)
 
 
@@ -44,7 +62,120 @@ def _ok(**payload: object) -> str:
 
 
 def _ensure_registry_dir() -> None:
-    os.makedirs(os.path.dirname(REGISTRY_PATH), exist_ok=True)
+    os.makedirs(REGISTRY_DIR, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# SQLite support
+# ---------------------------------------------------------------------------
+
+
+def _get_db() -> sqlite3.Connection:
+    """Return a WAL-mode SQLite connection. Creates schema if needed."""
+    _ensure_registry_dir()
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.row_factory = sqlite3.Row
+    _init_db(conn)
+    return conn
+
+
+def _init_db(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS workers (
+            worker_id       TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            capabilities    TEXT NOT NULL DEFAULT '[]',
+            version         TEXT NOT NULL DEFAULT '1.0.0',
+            matrix_user_id  TEXT NOT NULL,
+            device_id       TEXT NOT NULL DEFAULT '',
+            room_id         TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'registered',
+            message         TEXT NOT NULL DEFAULT '',
+            last_seen_at    TEXT NOT NULL DEFAULT '',
+            last_status_change TEXT NOT NULL DEFAULT '',
+            registered_at   TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
+        CREATE INDEX IF NOT EXISTS idx_workers_last_seen ON workers(last_seen_at);
+        """
+    )
+
+
+# ---------------------------------------------------------------------------
+# JSON → SQLite migration
+# ---------------------------------------------------------------------------
+
+
+def _migrate_json_to_sqlite() -> int:
+    """Import existing JSON registry into SQLite. Returns count of workers imported."""
+    if not os.path.exists(REGISTRY_PATH):
+        return 0
+
+    try:
+        with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0
+
+    if not isinstance(data, list):
+        return 0
+
+    conn = _get_db()
+    imported = 0
+    for item in data:
+        try:
+            worker = _worker_from_dict(item)
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO workers
+                (worker_id, name, capabilities, version, matrix_user_id, device_id,
+                 room_id, status, message, last_seen_at, last_status_change, registered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    worker.worker_id,
+                    worker.name,
+                    json.dumps(worker.capabilities),
+                    worker.version,
+                    worker.matrix_user_id,
+                    worker.device_id,
+                    worker.room_id,
+                    worker.status,
+                    worker.metadata.get("message", ""),
+                    worker.last_seen_at,
+                    worker.last_status_change or _utc_now(),
+                    worker.registered_at,
+                ),
+            )
+            if conn.total_changes > 0:
+                imported += 1
+        except Exception as exc:
+            logger.warning("Skipping invalid worker during migration: %s", exc)
+
+    conn.commit()
+    conn.close()
+
+    if imported > 0:
+        bak_path = REGISTRY_PATH + ".migrated"
+        os.replace(REGISTRY_PATH, bak_path)
+        logger.warning(
+            "Migrated %d workers from JSON to SQLite. Backup: %s", imported, bak_path
+        )
+
+    return imported
+
+
+# Ensure migration runs once at module load
+_migrate_json_to_sqlite()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _validate_capabilities(capabilities: object) -> list[str]:
@@ -53,6 +184,33 @@ def _validate_capabilities(capabilities: object) -> list[str]:
     ):
         raise ValueError("capabilities must be a list of strings")
     return capabilities
+
+
+def _worker_from_row(row: sqlite3.Row) -> Worker:
+    """Convert a sqlite3.Row to a Worker dataclass."""
+    capabilities_raw = row["capabilities"]
+    capabilities = (
+        json.loads(capabilities_raw)
+        if isinstance(capabilities_raw, str)
+        else capabilities_raw or []
+    )
+    metadata: dict[str, Any] = {}
+    if row["message"]:
+        metadata["message"] = row["message"]
+    return Worker(
+        worker_id=row["worker_id"],
+        name=row["name"],
+        capabilities=capabilities,
+        status=row["status"],
+        version=row["version"],
+        matrix_user_id=row["matrix_user_id"],
+        device_id=row["device_id"],
+        room_id=row["room_id"],
+        registered_at=row["registered_at"],
+        last_seen_at=row["last_seen_at"],
+        last_status_change=row["last_status_change"],
+        metadata=metadata,
+    )
 
 
 def _worker_from_dict(data: dict) -> Worker:
@@ -73,6 +231,7 @@ def _worker_from_dict(data: dict) -> Worker:
         room_id=str(data.get("room_id", "")),
         registered_at=str(data.get("registered_at", "")),
         last_seen_at=str(data.get("last_seen_at", "")),
+        last_status_change=str(data.get("last_status_change", "")),
         metadata=metadata,
     )
 
@@ -94,71 +253,6 @@ def _worker_from_dict(data: dict) -> Worker:
     return worker
 
 
-def _load_registry() -> list[dict]:
-    if not os.path.exists(REGISTRY_PATH):
-        return []
-
-    try:
-        with open(REGISTRY_PATH, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except FileNotFoundError:
-        return []
-    except json.JSONDecodeError as exc:
-        logger.warning("Invalid registry JSON at %s: %s", REGISTRY_PATH, exc)
-        return []
-    except OSError as exc:
-        logger.warning("Failed reading registry %s: %s", REGISTRY_PATH, exc)
-        return []
-
-    if not isinstance(data, list):
-        logger.warning(
-            "Registry file %s does not contain a list; ignoring", REGISTRY_PATH
-        )
-        return []
-
-    workers: list[dict] = []
-    for item in data:
-        try:
-            workers.append(asdict(_worker_from_dict(item)))
-        except ValueError as exc:
-            logger.warning("Skipping invalid worker record in registry: %s", exc)
-    return workers
-
-
-def _save_registry(workers: list[dict]) -> None:
-    _ensure_registry_dir()
-    directory = os.path.dirname(REGISTRY_PATH)
-
-    fd, temp_path = tempfile.mkstemp(
-        prefix="workers-registry-", suffix=".tmp", dir=directory
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(workers, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, REGISTRY_PATH)
-    except Exception:
-        try:
-            os.unlink(temp_path)
-        except OSError:
-            pass
-        raise
-
-
-def _find_worker(worker_id: str) -> dict | None:
-    for worker in _load_registry():
-        if worker.get("worker_id") == worker_id:
-            return worker
-    return None
-
-
-def _require_worker_id(worker_id: str) -> None:
-    if not isinstance(worker_id, str) or not worker_id.strip():
-        raise ValueError("worker_id is required")
-
-
 def _validate_status(status: str) -> str:
     if not isinstance(status, str) or not status.strip():
         raise ValueError("status is required")
@@ -168,6 +262,46 @@ def _validate_status(status: str) -> str:
             f"Invalid status '{normalized}'. Valid: {', '.join(sorted(VALID_STATUSES))}"
         )
     return normalized
+
+
+def _validate_status_transition(current: str, new: str) -> None:
+    """Raise ValueError if transition is not allowed."""
+    if current == new:
+        return  # No-op is always allowed
+    allowed = STATUS_TRANSITIONS.get(current, set())
+    if new not in allowed:
+        raise ValueError(
+            f"Invalid status transition: {current} → {new}. "
+            f"Allowed from '{current}': {', '.join(sorted(allowed)) or 'none'}"
+        )
+
+
+def _require_worker_id(worker_id: str) -> None:
+    if not isinstance(worker_id, str) or not worker_id.strip():
+        raise ValueError("worker_id is required")
+
+
+def _worker_to_dict(worker: Worker) -> dict:
+    """Serialize Worker dataclass to dict matching the old JSON format."""
+    return {
+        "worker_id": worker.worker_id,
+        "name": worker.name,
+        "capabilities": worker.capabilities,
+        "status": worker.status,
+        "version": worker.version,
+        "matrix_user_id": worker.matrix_user_id,
+        "device_id": worker.device_id,
+        "room_id": worker.room_id,
+        "registered_at": worker.registered_at,
+        "last_seen_at": worker.last_seen_at,
+        "last_status_change": worker.last_status_change,
+        "metadata": worker.metadata,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
 
 
 def wr_register(
@@ -193,15 +327,43 @@ def wr_register(
     except ValueError as exc:
         return _error(str(exc))
 
-    workers = _load_registry()
-    if any(worker.get("worker_id") == worker_id for worker in workers):
-        logger.warning("Duplicate worker registration rejected for %s", worker_id)
-        return _error(
-            f"Worker {worker_id} already registered. Use wr_heartbeat instead.",
-            worker_id=worker_id,
-        )
-
     now = _utc_now()
+    conn = _get_db()
+    try:
+        existing = conn.execute(
+            "SELECT worker_id FROM workers WHERE worker_id = ?", (worker_id,)
+        ).fetchone()
+        if existing is not None:
+            logger.warning("Duplicate worker registration rejected for %s", worker_id)
+            return _error(
+                f"Worker {worker_id} already registered. Use wr_heartbeat instead.",
+                worker_id=worker_id,
+            )
+
+        conn.execute(
+            """
+            INSERT INTO workers
+            (worker_id, name, capabilities, version, matrix_user_id, device_id,
+             room_id, status, last_seen_at, last_status_change, registered_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'registered', ?, ?, ?)
+            """,
+            (
+                worker_id,
+                name.strip(),
+                json.dumps(validated_capabilities),
+                version.strip(),
+                matrix_user_id.strip(),
+                device_id.strip(),
+                room_id.strip() if isinstance(room_id, str) else "",
+                now,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
     worker = Worker(
         worker_id=worker_id,
         name=name.strip(),
@@ -213,12 +375,10 @@ def wr_register(
         room_id=room_id.strip() if isinstance(room_id, str) else "",
         registered_at=now,
         last_seen_at=now,
+        last_status_change=now,
         metadata={},
     )
-    workers.append(asdict(worker))
-    _save_registry(workers)
-
-    return _ok(status="ok", worker=asdict(worker))
+    return _ok(status="ok", worker=_worker_to_dict(worker))
 
 
 def wr_heartbeat(worker_id: str) -> str:
@@ -227,21 +387,42 @@ def wr_heartbeat(worker_id: str) -> str:
     except ValueError as exc:
         return _error(str(exc))
 
-    workers = _load_registry()
-    for worker in workers:
-        if worker.get("worker_id") == worker_id:
-            now = _utc_now()
-            worker["last_seen_at"] = now
-            _save_registry(workers)
-            return _ok(
-                status="ok",
-                worker_id=worker_id,
-                last_seen_at=now,
-                worker_status=worker.get("status"),
+    now = _utc_now()
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM workers WHERE worker_id = ?", (worker_id,)
+        ).fetchone()
+        if row is None:
+            logger.warning("Heartbeat received for missing worker %s", worker_id)
+            return _error(f"Worker {worker_id} not found.", worker_id=worker_id)
+
+        current_status = row["status"]
+        new_status = current_status
+
+        # Auto-recover offline workers to ready
+        if current_status == "offline":
+            new_status = "ready"
+            conn.execute(
+                "UPDATE workers SET last_seen_at=?, status=?, last_status_change=? "
+                "WHERE worker_id=?",
+                (now, new_status, now, worker_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE workers SET last_seen_at=? WHERE worker_id=?",
+                (now, worker_id),
             )
 
-    logger.warning("Heartbeat received for missing worker %s", worker_id)
-    return _error(f"Worker {worker_id} not found.", worker_id=worker_id)
+        conn.commit()
+        return _ok(
+            status="ok",
+            worker_id=worker_id,
+            last_seen_at=now,
+            worker_status=new_status,
+        )
+    finally:
+        conn.close()
 
 
 def wr_update_status(worker_id: str, status: str, message: str = "") -> str:
@@ -253,30 +434,42 @@ def wr_update_status(worker_id: str, status: str, message: str = "") -> str:
     except ValueError as exc:
         return _error(str(exc))
 
-    workers = _load_registry()
-    for worker in workers:
-        if worker.get("worker_id") == worker_id:
-            metadata = dict(worker.get("metadata") or {})
-            if message:
-                metadata["message"] = message
-            elif "message" in metadata:
-                metadata.pop("message", None)
+    now = _utc_now()
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM workers WHERE worker_id = ?", (worker_id,)
+        ).fetchone()
+        if row is None:
+            logger.warning("Status update received for missing worker %s", worker_id)
+            return _error(f"Worker {worker_id} not found.", worker_id=worker_id)
 
-            now = _utc_now()
-            worker["status"] = normalized_status
-            worker["metadata"] = metadata
-            worker["last_seen_at"] = now
-            _save_registry(workers)
-            return _ok(
-                status="ok",
-                worker_id=worker_id,
-                worker_status=normalized_status,
-                last_seen_at=now,
-                metadata=metadata,
-            )
+        current_status = row["status"]
+        _validate_status_transition(current_status, normalized_status)
 
-    logger.warning("Status update received for missing worker %s", worker_id)
-    return _error(f"Worker {worker_id} not found.", worker_id=worker_id)
+        conn.execute(
+            "UPDATE workers SET status=?, message=?, last_seen_at=?, last_status_change=? "
+            "WHERE worker_id=?",
+            (
+                normalized_status,
+                message or "",
+                now,
+                now,
+                worker_id,
+            ),
+        )
+        conn.commit()
+        return _ok(
+            status="ok",
+            worker_id=worker_id,
+            worker_status=normalized_status,
+            last_seen_at=now,
+            message=message or "",
+        )
+    except ValueError as exc:
+        return _error(str(exc))
+    finally:
+        conn.close()
 
 
 def wr_remove(worker_id: str) -> str:
@@ -285,16 +478,18 @@ def wr_remove(worker_id: str) -> str:
     except ValueError as exc:
         return _error(str(exc))
 
-    workers = _load_registry()
-    filtered_workers = [
-        worker for worker in workers if worker.get("worker_id") != worker_id
-    ]
-    if len(filtered_workers) == len(workers):
-        logger.warning("Remove requested for missing worker %s", worker_id)
-        return _error(f"Worker {worker_id} not found.", worker_id=worker_id)
-
-    _save_registry(filtered_workers)
-    return _ok(status="ok", removed=True, worker_id=worker_id)
+    conn = _get_db()
+    try:
+        affected = conn.execute(
+            "DELETE FROM workers WHERE worker_id = ?", (worker_id,)
+        ).rowcount
+        conn.commit()
+        if affected == 0:
+            logger.warning("Remove requested for missing worker %s", worker_id)
+            return _error(f"Worker {worker_id} not found.", worker_id=worker_id)
+        return _ok(status="ok", removed=True, worker_id=worker_id)
+    finally:
+        conn.close()
 
 
 def wr_list(status: str | None = None) -> str:
@@ -305,13 +500,19 @@ def wr_list(status: str | None = None) -> str:
     except ValueError as exc:
         return _error(str(exc))
 
-    workers = _load_registry()
-    if normalized_status is not None:
-        workers = [
-            worker for worker in workers if worker.get("status") == normalized_status
-        ]
+    conn = _get_db()
+    try:
+        if normalized_status is not None:
+            rows = conn.execute(
+                "SELECT * FROM workers WHERE status = ?", (normalized_status,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM workers").fetchall()
 
-    return _ok(status="ok", count=len(workers), workers=workers)
+        workers = [_worker_to_dict(_worker_from_row(row)) for row in rows]
+        return _ok(status="ok", count=len(workers), workers=workers)
+    finally:
+        conn.close()
 
 
 def wr_get(worker_id: str) -> str:
@@ -320,13 +521,67 @@ def wr_get(worker_id: str) -> str:
     except ValueError as exc:
         return _error(str(exc))
 
-    worker = _find_worker(worker_id)
-    if worker is None:
-        logger.warning("Lookup requested for missing worker %s", worker_id)
-        return _error(f"Worker {worker_id} not found.", worker_id=worker_id)
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM workers WHERE worker_id = ?", (worker_id,)
+        ).fetchone()
+        if row is None:
+            logger.warning("Lookup requested for missing worker %s", worker_id)
+            return _error(f"Worker {worker_id} not found.", worker_id=worker_id)
+        return _ok(status="ok", worker=_worker_to_dict(_worker_from_row(row)))
+    finally:
+        conn.close()
 
-    return _ok(status="ok", worker=worker)
 
+def wr_get_stale_workers(timeout_seconds: int = STALE_THRESHOLD_SECONDS) -> str:
+    """Return workers that have not sent a heartbeat within timeout_seconds.
+
+    Also marks them as offline. Workers that are already offline are excluded.
+    """
+    if not isinstance(timeout_seconds, int) or timeout_seconds <= 0:
+        return _error("timeout_seconds must be a positive integer")
+
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+    cutoff_str = cutoff.isoformat()
+
+    conn = _get_db()
+    try:
+        # Pick up non-offline workers who haven't been seen since cutoff
+        rows = conn.execute(
+            """
+            SELECT * FROM workers
+            WHERE status != 'offline' AND last_seen_at != '' AND last_seen_at < ?
+            """,
+            (cutoff_str,),
+        ).fetchall()
+
+        if rows:
+            stale_ids = [row["worker_id"] for row in rows]
+            conn.executemany(
+                "UPDATE workers SET status='offline', last_status_change=? "
+                "WHERE worker_id=?",
+                [(_utc_now(), wid) for wid in stale_ids],
+            )
+            conn.commit()
+
+        stale_workers = [_worker_to_dict(_worker_from_row(row)) for row in rows]
+        return _ok(
+            status="ok",
+            count=len(stale_workers),
+            timeout_seconds=timeout_seconds,
+            cutoff=cutoff_str,
+            workers=stale_workers,
+        )
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# MCP tool definitions
+# ---------------------------------------------------------------------------
 
 TOOL_DEFINITIONS = [
     {
@@ -366,13 +621,15 @@ TOOL_DEFINITIONS = [
                 "version",
                 "matrix_user_id",
                 "device_id",
-                "room_id",
             ],
         },
     },
     {
         "name": "wr_heartbeat",
-        "description": "Refresh a worker's last_seen_at timestamp.",
+        "description": (
+            "Refresh a worker's last_seen_at timestamp. "
+            "Automatically recovers offline workers back to 'ready'."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -383,7 +640,13 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "wr_update_status",
-        "description": "Update a worker's status and optional status message.",
+        "description": (
+            "Update a worker's status and optional status message. "
+            "Valid transitions: registered→ready/offline/error, "
+            "ready→busy/offline/error, busy→ready/offline/error, "
+            "done→ready/offline/error, error→ready/offline, "
+            "offline→ready/error."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -435,6 +698,24 @@ TOOL_DEFINITIONS = [
             "required": ["worker_id"],
         },
     },
+    {
+        "name": "wr_get_stale_workers",
+        "description": (
+            "Return workers that have not sent a heartbeat within timeout_seconds. "
+            "Marks stale workers as offline. "
+            "Call periodically (e.g., every 60s) to keep worker state accurate."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": f"Seconds since last heartbeat to consider stale. Default: {STALE_THRESHOLD_SECONDS}.",
+                    "default": STALE_THRESHOLD_SECONDS,
+                }
+            },
+        },
+    },
 ]
 
 
@@ -445,6 +726,7 @@ TOOL_HANDLERS = {
     "wr_remove": wr_remove,
     "wr_list": wr_list,
     "wr_get": wr_get,
+    "wr_get_stale_workers": wr_get_stale_workers,
 }
 
 
@@ -469,6 +751,8 @@ def write_json(obj):
 
 def main():
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    # Prime the DB connection (runs migration) at startup
+    _get_db().close()
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -486,7 +770,7 @@ def main():
                             "capabilities": {},
                             "serverInfo": {
                                 "name": "worker-registry",
-                                "version": "1.0.0",
+                                "version": "1.1.0",
                             },
                         },
                     }
