@@ -26,23 +26,20 @@ Workers move through a defined lifecycle: `registered` → `ready` / `busy` / `d
 
 ## Registration
 
-Workers self-register by sending a JSON payload to the Manager Matrix room. The Manager parses it with `WorkerMessageParser.parse_registration()`.
+Workers self-register by sending a JSON payload to the Manager Matrix room. The Manager calls `wr_register` to record the worker:
 
 ```python
-# skills/hiclaw/worker_registry.py — WorkerRegistry.register_worker()
-from skills.hiclaw.worker_registry import WorkerRegistry
-
-registry = WorkerRegistry()
-worker = await registry.register_worker(
-    worker_id="hermes-worker-alice",
-    name="alice",
-    capabilities=["coding", "research", "file-ops"],
-    version="1.0.0",
-    matrix_user_id="@alice:matrix.example.com",
-    device_id="DEVICEABC123",
-    room_id="!manager-room:matrix.example.com",
-)
-# worker.status == "registered"
+# Call wr_register MCP tool
+result = await mcp_tool("wr_register", {
+    "worker_id": "hermes-worker-alice",
+    "name": "alice",
+    "capabilities": ["coding", "research", "file-ops"],
+    "version": "1.0.0",
+    "matrix_user_id": "@alice:matrix.example.com",
+    "device_id": "DEVICEABC123",
+})
+# result["worker"]["status"] == "registered"
+# result["worker"]["registered_at"] is set automatically
 ```
 
 Required JSON fields for registration (from `WorkerMessageParser.parse_registration()`):
@@ -64,20 +61,22 @@ Required JSON fields for registration (from `WorkerMessageParser.parse_registrat
 Workers send a heartbeat every **2 minutes**. The Manager checks heartbeats every **5 minutes**. The heartbeat updates `last_seen_at` but preserves the worker's current status.
 
 ```python
-# skills/hiclaw/worker_registry.py — WorkerRegistry.heartbeat()
-worker = await registry.heartbeat("hermes-worker-alice")
-# worker.last_seen_at refreshed; worker.status unchanged
+# Call wr_heartbeat MCP tool
+result = await mcp_tool("wr_heartbeat", {
+    "worker_id": "hermes-worker-alice",
+})
+# result["worker"]["last_seen_at"] refreshed; status unchanged
 ```
 
 The heartbeat flow:
 1. Worker sends `//heartbeat` message (or JSON status ping) to Manager room
-2. Manager calls `registry.heartbeat(worker_id)`
+2. Manager calls `wr_heartbeat(worker_id)`
 3. `last_seen_at` is updated to current UTC time
 4. Worker status remains whatever it was (`ready`, `busy`, etc.)
 
 ## Status Updates
 
-Workers report status changes via JSON messages parsed by `WorkerMessageParser.parse_status()`:
+Workers report status changes via JSON messages. The Manager calls `wr_update_status`:
 
 ```json
 {
@@ -88,14 +87,14 @@ Workers report status changes via JSON messages parsed by `WorkerMessageParser.p
 ```
 
 ```python
-# skills/hiclaw/worker_registry.py — WorkerRegistry.update_status()
-worker = await registry.update_status(
-    "hermes-worker-alice",
-    status="busy",
-    message="Executing task task-42"
-)
-# worker.status == "busy"
-# worker.metadata["last_message"] == "Executing task task-42"
+# Call wr_update_status MCP tool
+result = await mcp_tool("wr_update_status", {
+    "worker_id": "hermes-worker-alice",
+    "status": "busy",
+    "message": "Executing task task-42",
+})
+# result["worker"]["status"] == "busy"
+# result["worker"]["metadata"]["last_message"] == "Executing task task-42"
 ```
 
 ## Deregistration
@@ -103,39 +102,43 @@ worker = await registry.update_status(
 Remove a worker from the registry when it shuts down or is replaced:
 
 ```python
-# skills/hiclaw/worker_registry.py — WorkerRegistry.remove_worker()
-removed = await registry.remove_worker("hermes-worker-alice")
-# removed == True
+# Call wr_remove MCP tool
+result = await mcp_tool("wr_remove", {
+    "worker_id": "hermes-worker-alice",
+})
+# result["removed"] == True
 ```
 
 ## Querying Workers
 
 ```python
-# List all workers
-all_workers = await registry.list_workers()
+# List all workers (wr_list)
+result = await mcp_tool("wr_list", {})
+# result["workers"] is a list of all registered workers
 
-# List only workers with a specific status
-ready_workers = await registry.list_workers(status="ready")
+# List workers by status (wr_list with status filter)
+result = await mcp_tool("wr_list", {"status": "ready"})
+# result["workers"] contains only ready workers
 
-# Get a specific worker
-worker = await registry.get_worker("hermes-worker-alice")
+# Get a specific worker (wr_get)
+result = await mcp_tool("wr_get", {"worker_id": "hermes-worker-alice"})
+# result["worker"] contains the worker object, or None if not found
 ```
 
 ## Manager-Side: Parsing Worker Messages
 
+Worker message parsing is handled automatically by `HiClawManagerHandler` (`gateway/hiclaw/manager_handler.py`) — it intercepts worker messages before they reach the LLM agent. The Manager uses MCP tools to interact with worker data after parsing:
+
 ```python
-# skills/hiclaw/manager_handler.py — WorkerMessageParser
-from skills.hiclaw.manager_handler import WorkerMessageParser
+# Worker message indicators (for custom routing — normally handled automatically):
+# - JSON with "status" + "worker" keys → status update
+# - JSON with "id" + "capabilities" + "status" → registration
 
-# Check if a Matrix message is a worker message
-is_worker = WorkerMessageParser.is_worker_message(content)
+# Query registered workers (wr_list)
+result = await mcp_tool("wr_list", {"status": "ready"})
 
-# Parse registration
-reg_data = WorkerMessageParser.parse_registration(content)
-
-# Parse status update
-status_tuple = WorkerMessageParser.parse_status(content)
-# Returns (status, worker_name, message) or None
+# Get a specific worker (wr_get)
+result = await mcp_tool("wr_get", {"worker_id": "hermes-worker-alice"})
 ```
 
 ## Manager-Side: Heartbeat Monitoring

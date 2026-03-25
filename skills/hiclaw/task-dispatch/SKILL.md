@@ -36,88 +36,91 @@ pending → assigned → running → completed
 ## Adding a Task
 
 ```python
-# skills/hiclaw/manager_state.py — ManagerState.add_task()
-from skills.hiclaw.manager_state import ManagerState
-
-state = ManagerState()
-task = await state.add_task(
-    task_id="task-001",
-    spec_path="/tasks/spec-001.md"
-)
-# task.status == "pending"
+# Call tq_add_task MCP tool
+result = await mcp_tool("tq_add_task", {
+    "task_id": "task-001",
+    "spec_path": "/tasks/spec-001.md",
+})
+# result["task"]["status"] == "pending"
 ```
 
 ## Assigning a Task to a Worker
 
 ```python
-# skills/hiclaw/manager_state.py — ManagerState.assign_task()
-task = await state.assign_task(
-    task_id="task-001",
-    worker_id="hermes-worker-alice"
-)
-# task.status == "assigned"
-# task.assigned_worker == "hermes-worker-alice"
+# Call tq_assign MCP tool
+result = await mcp_tool("tq_assign", {
+    "task_id": "task-001",
+    "worker_id": "hermes-worker-alice",
+})
+# result["task"]["status"] == "assigned"
+# result["task"]["assigned_worker"] == "hermes-worker-alice"
 ```
 
 ## Completing a Task
 
 ```python
-# skills/hiclaw/manager_state.py — ManagerState.complete_task()
-task = await state.complete_task(
-    task_id="task-001",
-    result_path="/tasks/result-001.md"
-)
-# task.status == "completed"
-# task.result_path == "/tasks/result-001.md"
+# Call tq_complete MCP tool
+result = await mcp_tool("tq_complete", {
+    "task_id": "task-001",
+    "result_path": "/tasks/result-001.md",
+})
+# result["task"]["status"] == "completed"
+# result["task"]["result_path"] == "/tasks/result-001.md"
 ```
 
 ## Failing a Task
 
 ```python
-# skills/hiclaw/manager_state.py — ManagerState.fail_task()
-task = await state.fail_task(
-    task_id="task-001",
-    error="Worker crashed during execution"
-)
-# task.status == "failed"
-# task.error == "Worker crashed during execution"
+# Call tq_fail MCP tool
+result = await mcp_tool("tq_fail", {
+    "task_id": "task-001",
+    "error": "Worker crashed during execution",
+})
+# result["task"]["status"] == "failed"
+# result["task"]["error"] == "Worker crashed during execution"
 ```
 
 ## Querying Tasks
 
 ```python
-# List all tasks
-all_tasks = await state.list_tasks()
+# List all tasks (tq_list)
+result = await mcp_tool("tq_list", {})
+# result["tasks"] is a list of all tasks
 
-# List tasks by status
-pending = await state.list_tasks(status="pending")
-running = await state.list_tasks(status="running")
+# List tasks by status (tq_list with status filter)
+result = await mcp_tool("tq_list", {"status": "pending"})
+# result["tasks"] contains only pending tasks
 
-# Get a specific task
-task = await state.get_task("task-001")
+# Get a specific task (tq_get)
+result = await mcp_tool("tq_get", {"task_id": "task-001"})
+# result["task"] contains the task object, or None if not found
 ```
 
 ## Getting Statistics
 
 ```python
-# skills/hiclaw/manager_state.py — ManagerState.get_stats()
-stats = await state.get_stats()
+# Call tq_stats MCP tool
+result = await mcp_tool("tq_stats", {})
 # Returns: {"total_tasks": 10, "completed_tasks": 7, "failed_tasks": 2}
 ```
 
 ## Manager Mode
 
-`ManagerState` tracks the Manager's operating mode via `ManagerMode` enum:
+The task queue tracks the Manager's operating mode. Use `tq_set_mode` and `tq_get_mode`:
 
 ```python
-# skills/hiclaw/manager_state.py — ManagerMode
-from skills.hiclaw.manager_state import ManagerMode
+# Set manager mode to IDLE (no tasks being dispatched)
+await mcp_tool("tq_set_mode", {"mode": "idle"})
 
-await state.set_mode(ManagerMode.IDLE)       # No tasks being dispatched
-await state.set_mode(ManagerMode.DISPATCHING)  # Actively assigning tasks
-await state.set_mode(ManagerMode.MONITORING)   # Monitoring running tasks
+# Set manager mode to DISPATCHING (actively assigning tasks)
+await mcp_tool("tq_set_mode", {"mode": "dispatching"})
 
-mode = await state.get_mode()  # Returns ManagerMode enum value
+# Set manager mode to MONITORING (monitoring running tasks)
+await mcp_tool("tq_set_mode", {"mode": "monitoring"})
+
+# Get current manager mode
+result = await mcp_tool("tq_get_mode", {})
+# result["mode"] is "idle", "dispatching", or "monitoring"
 ```
 
 ## Dispatch Workflow

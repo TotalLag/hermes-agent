@@ -87,25 +87,33 @@ await matrix_client.send_dm(
 
 ## Manager-Side Registration Handler
 
-```python
-# skills/hiclaw/manager_handler.py — WorkerMessageParser.parse_registration()
-from skills.hiclaw.manager_handler import WorkerMessageParser
-from skills.hiclaw.worker_registry import WorkerRegistry
+When the Manager receives a worker registration message, it calls the `wr_register` MCP tool to record the worker in the registry:
 
-async def on_worker_message(content: str):
-    reg_data = WorkerMessageParser.parse_registration(content)
-    if reg_data:
-        registry = WorkerRegistry()
-        worker = await registry.register_worker(
-            worker_id=reg_data["id"],
-            name=reg_data["name"],
-            capabilities=reg_data["capabilities"],
-            version=reg_data["version"],
-            matrix_user_id=reg_data["matrix_user_id"],
-            device_id=reg_data["device_id"],
-        )
-        # Worker registered at worker.registered_at
-        return worker
+```python
+# Call wr_register MCP tool — HiClawManagerHandler parses the message
+# and calls the tool on your behalf, or you can call it directly:
+result = await mcp_tool("wr_register", {
+    "worker_id": "hermes-worker-alice",
+    "name": "alice",
+    "capabilities": ["coding", "research", "file-ops"],
+    "version": "1.0.0",
+    "matrix_user_id": "@alice:matrix.example.com",
+    "device_id": "DEVICEABC123",
+})
+# result["worker"] contains the registered worker object
+# result["worker"]["status"] == "registered"
+# result["worker"]["registered_at"] is set automatically
+```
+
+To update a worker's status after registration:
+
+```python
+# Call wr_update_status MCP tool
+result = await mcp_tool("wr_update_status", {
+    "worker_id": "hermes-worker-alice",
+    "status": "ready",
+    "message": "Worker initialized and ready",
+})
 ```
 
 ## Container Naming Convention

@@ -36,24 +36,20 @@ Worker sends Matrix DM
 
 ## WorkerMessageParser
 
-`WorkerMessageParser` (`skills/hiclaw/manager_handler.py`) parses JSON messages from workers:
+`WorkerMessageParser` (`gateway/hiclaw/protocol.py`) parses JSON messages from workers. The `HiClawManagerHandler` intercepts worker messages automatically — parsing is handled internally. The Manager uses these MCP tools to interact with worker data after parsing:
 
 ```python
-from skills.hiclaw.manager_handler import WorkerMessageParser
+# List all registered workers (wr_list)
+result = await mcp_tool("wr_list", {"status": "ready"})
+# Returns list of workers matching the status filter
 
-# Check if a Matrix message is a worker message
-is_worker = WorkerMessageParser.is_worker_message(content)
-# Returns True if the message contains worker indicators like
-# "status" + "worker" keys, or "id" + "capabilities" + "status"
+# Get a specific worker by ID (wr_get)
+result = await mcp_tool("wr_get", {"worker_id": "hermes-worker-alice"})
+# Returns worker object or None
 
-# Parse worker registration
-reg_data = WorkerMessageParser.parse_registration(content)
-# Returns dict with worker info if all required fields present
-# Required: id, name, capabilities, status, version, matrix_user_id, device_id
-
-# Parse status update
-status_tuple = WorkerMessageParser.parse_status(content)
-# Returns (status, worker_name, message) tuple or None
+# Check if content looks like a worker message (for custom routing)
+# This is handled internally by HiClawManagerHandler — you don't call it directly.
+# Worker message indicators: "status" + "worker" keys, or "id" + "capabilities" + "status"
 ```
 
 ## Incoming Message Flow (Manager Side)
@@ -65,24 +61,32 @@ async def on_matrix_message(room_id: str, sender: str, content: str):
     if room_id != MANAGER_ROOM_ID:
         return
 
-    # Check if this is a worker message
-    if WorkerMessageParser.is_worker_message(content):
-        # Try registration first
-        reg_data = WorkerMessageParser.parse_registration(content)
-        if reg_data:
-            from skills.hiclaw.worker_registry import WorkerRegistry
-            registry = WorkerRegistry()
-            await registry.register_worker(**reg_data)
-            return
+    # Check if this is a worker message (handled automatically by HiClawManagerHandler)
+    # Worker message indicators: "status" + "worker" keys, or "id" + "capabilities" + "status"
 
-        # Try status update
-        status_tuple = WorkerMessageParser.parse_status(content)
-        if status_tuple:
-            status, worker_name, message = status_tuple
-            from skills.hiclaw.worker_registry import WorkerRegistry
-            registry = WorkerRegistry()
-            await registry.update_status(worker_name, status, message)
-            return
+    # When HiClawManagerHandler parses a registration, it calls wr_register:
+    if is_worker_registration_content(content):
+        reg_data = parse_registration(content)  # handled internally
+        # Manager calls MCP tool to register worker:
+        result = await mcp_tool("wr_register", {
+            "worker_id": reg_data["id"],
+            "name": reg_data["name"],
+            "capabilities": reg_data["capabilities"],
+            "version": reg_data["version"],
+            "matrix_user_id": reg_data["matrix_user_id"],
+            "device_id": reg_data["device_id"],
+        })
+        return
+
+    # When HiClawManagerHandler parses a status update, it calls wr_update_status:
+    if is_worker_status_content(content):
+        status, worker_name, message = parse_status(content)  # handled internally
+        result = await mcp_tool("wr_update_status", {
+            "worker_id": worker_name,
+            "status": status,
+            "message": message,
+        })
+        return
 ```
 
 ## Sending Messages (Manager Side)
