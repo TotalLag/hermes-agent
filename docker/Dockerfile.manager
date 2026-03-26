@@ -30,6 +30,14 @@
 
 FROM python:3.11-slim
 
+# Labels for container metadata
+LABEL com.hiclaw.role=manager
+LABEL com.hiclaw.version=${HICLAW_VERSION:-dev}
+
+# Resource limits (enforced by container runtime via --memory and --cpus)
+ENV HERMES_MEMORY_LIMIT=${HERMES_MEMORY_LIMIT:-}
+ENV HERMES_CPU_LIMIT=${HERMES_CPU_LIMIT:-}
+
 WORKDIR /app
 
 # Install system deps
@@ -64,6 +72,7 @@ RUN uv pip install --no-cache-dir -e /app
 RUN ln -s /opt/hermes-env/bin/hermes /usr/local/bin/hermes
 
 # Create hermes home and data directories
+# Note: /root/.hermes/hiclaw should be mounted as a volume for data persistence
 RUN mkdir -p /root/.hermes/hiclaw
 
 # Expose Matrix gateway port (for local development)
@@ -73,9 +82,11 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -sf http://localhost:8000/health || exit 1
 
-# Run hermes-agent as manager
-# The hiclaw/manager skill handles worker registration, task dispatch, heartbeats
-CMD ["hermes", "agent", \
-     "--model", "${HICLAW_LLM_PROVIDER}:${HICLAW_DEFAULT_MODEL}", \
-     "--platform", "matrix", \
-     "--skills", "hiclaw/manager"]
+# Run as root to access Docker socket for worker management
+# The manager needs to spawn and monitor worker containers
+USER root
+
+# Wrapper script to enforce resource limits
+COPY docker/manager-entrypoint.sh /usr/local/bin/manager-entrypoint.sh
+RUN chmod +x /usr/local/bin/manager-entrypoint.sh
+CMD ["/usr/local/bin/manager-entrypoint.sh"]

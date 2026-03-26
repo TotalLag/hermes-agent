@@ -28,6 +28,13 @@
 
 FROM python:3.11-slim
 
+# Labels for container metadata
+LABEL com.hiclaw.role=worker
+LABEL com.hiclaw.version=${HICLAW_VERSION:-dev}
+
+# Worker data directory for persistence
+ENV WORKER_DATA_DIR=/root/.hermes
+
 WORKDIR /app
 
 # Install system deps for hermes-agent and docker operations
@@ -65,8 +72,8 @@ RUN mkdir -p /root/.hermes
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)" || exit 1
 
-# Run hermes-agent as worker
-CMD ["hermes", "agent", \
-     "--model", "${HICLAW_LLM_PROVIDER}:${HICLAW_DEFAULT_MODEL}", \
-     "--platform", "matrix", \
-     "--skills", "hiclaw/worker-lifecycle"]
+# Required env vars: WORKER_CAPABILITIES, HICLAW_MANAGER_ID, HICLAW_WORKER_NAME
+# Wrapper script for graceful shutdown handling
+COPY docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint.sh
+RUN chmod +x /usr/local/bin/worker-entrypoint.sh
+CMD ["/usr/local/bin/worker-entrypoint.sh"]
