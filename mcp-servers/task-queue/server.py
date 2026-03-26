@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
-import enum
+from enum import Enum
 import json
 import logging
 import os
@@ -273,8 +273,11 @@ def tq_add_task(task_id: str, spec_path: str) -> str:
     return _ok(success=True, task=_task_to_dict(task))
 
 
+WORKER_REGISTRY_DB = os.path.join(QUEUE_DIR, "workers-registry.db")
+
+
 def tq_assign(task_id: str, worker_id: str) -> str:
-    """Assign a pending task to a worker."""
+    """Assign a pending task to a worker. Atomic: updates both task and worker status."""
     if not isinstance(task_id, str) or not task_id.strip():
         return _error("task_id is required")
     if not isinstance(worker_id, str) or not worker_id.strip():
@@ -283,6 +286,10 @@ def tq_assign(task_id: str, worker_id: str) -> str:
     now = _utc_now()
     conn = _get_db()
     try:
+        worker_db_exists = os.path.exists(WORKER_REGISTRY_DB)
+        if worker_db_exists:
+            conn.execute(f"ATTACH DATABASE ? AS wr", (WORKER_REGISTRY_DB,))
+
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             return _error(f"Task '{task_id}' not found")
@@ -293,19 +300,47 @@ def tq_assign(task_id: str, worker_id: str) -> str:
                 f"Cannot assign task in '{current_status}' status. Must be 'pending'"
             )
 
-        conn.execute(
+        task_updated = conn.execute(
             """
             UPDATE tasks SET assigned_worker=?, status='assigned', updated_at=?
-            WHERE id=?
+            WHERE id=? AND status='pending'
             """,
             (worker_id.strip(), now, task_id),
         )
+        if task_updated.rowcount == 0:
+            conn.rollback()
+            return _error(f"Task '{task_id}' not available for assignment")
+
+        if worker_db_exists:
+            worker_updated = conn.execute(
+                """
+                UPDATE wr.workers SET status='busy', last_status_change=?
+                WHERE worker_id=? AND status='ready'
+                """,
+                (now, worker_id.strip()),
+            )
+            if worker_updated.rowcount == 0:
+                conn.rollback()
+                conn.execute("DETACH DATABASE wr")
+                return _error(
+                    f"Worker '{worker_id}' is not available (not in 'ready' status)"
+                )
+
         conn.commit()
+        if worker_db_exists:
+            conn.execute("DETACH DATABASE wr")
 
         updated_row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         return _ok(success=True, task=_task_from_row(updated_row))
+    except Exception:
+        try:
+            conn.rollback()
+            conn.execute("DETACH DATABASE wr")
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 
