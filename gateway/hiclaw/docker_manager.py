@@ -86,6 +86,12 @@ class DockerManager:
         """
         container_name = f"{WORKER_CONTAINER_PREFIX}{worker_name}"
 
+        if self._client is None:
+            logger.warning(
+                "DockerManager: cannot launch %s — Docker unavailable", container_name
+            )
+            return WorkerContainer(name=container_name, status=ContainerStatus.UNKNOWN)
+
         if remove_if_exists:
             try:
                 self._client.containers.get(container_name).remove(force=True)
@@ -173,6 +179,8 @@ class DockerManager:
 
     def list_workers(self, all_states: bool = False) -> List[WorkerContainer]:
         """List all hermes-worker-* containers."""
+        if self._client is None:
+            return []
         try:
             return [
                 self._container_to_worker(c)

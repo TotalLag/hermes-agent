@@ -381,7 +381,7 @@ def tq_start(task_id: str) -> str:
 
 
 def tq_complete(task_id: str, result_path: str) -> str:
-    """Mark a running task as completed."""
+    """Mark a running task as completed. Frees the worker back to ready status."""
     if not isinstance(task_id, str) or not task_id.strip():
         return _error("task_id is required")
     if not isinstance(result_path, str):
@@ -390,6 +390,10 @@ def tq_complete(task_id: str, result_path: str) -> str:
     now = _utc_now()
     conn = _get_db()
     try:
+        worker_db_exists = os.path.exists(WORKER_REGISTRY_DB)
+        if worker_db_exists:
+            conn.execute(f"ATTACH DATABASE ? AS wr", (WORKER_REGISTRY_DB,))
+
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             return _error(f"Task '{task_id}' not found")
@@ -400,6 +404,9 @@ def tq_complete(task_id: str, result_path: str) -> str:
                 f"Cannot complete task in '{current_status}' status. Must be 'running'"
             )
 
+        # Capture assigned_worker before clearing it
+        assigned_worker = row["assigned_worker"]
+
         conn.execute(
             """
             UPDATE tasks SET status='completed', result_path=?, assigned_worker='',
@@ -408,18 +415,37 @@ def tq_complete(task_id: str, result_path: str) -> str:
             """,
             (result_path, now, task_id),
         )
+
+        if worker_db_exists and assigned_worker:
+            conn.execute(
+                """
+                UPDATE wr.workers SET status='ready', last_status_change=?
+                WHERE worker_id=? AND status='busy'
+                """,
+                (now, assigned_worker),
+            )
+
         conn.commit()
+        if worker_db_exists:
+            conn.execute("DETACH DATABASE wr")
 
         updated_row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         return _ok(success=True, task=_task_from_row(updated_row))
+    except Exception:
+        try:
+            conn.rollback()
+            conn.execute("DETACH DATABASE wr")
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 
 
 def tq_fail(task_id: str, error: str) -> str:
-    """Mark a running task as failed."""
+    """Mark a running task as failed. Frees the worker back to ready status."""
     if not isinstance(task_id, str) or not task_id.strip():
         return _error("task_id is required")
     if not isinstance(error, str):
@@ -428,15 +454,21 @@ def tq_fail(task_id: str, error: str) -> str:
     now = _utc_now()
     conn = _get_db()
     try:
+        worker_db_exists = os.path.exists(WORKER_REGISTRY_DB)
+        if worker_db_exists:
+            conn.execute(f"ATTACH DATABASE ? AS wr", (WORKER_REGISTRY_DB,))
+
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             return _error(f"Task '{task_id}' not found")
 
         current_status = row["status"]
-        if current_status != "running":
+        if current_status not in ("running", "failed"):
             return _error(
-                f"Cannot fail task in '{current_status}' status. Must be 'running'"
+                f"Cannot fail task in '{current_status}' status. Must be 'running' or 'failed'"
             )
+
+        assigned_worker = row["assigned_worker"]
 
         conn.execute(
             """
@@ -446,12 +478,31 @@ def tq_fail(task_id: str, error: str) -> str:
             """,
             (error, now, task_id),
         )
+
+        if worker_db_exists and assigned_worker:
+            conn.execute(
+                """
+                UPDATE wr.workers SET status='ready', last_status_change=?
+                WHERE worker_id=? AND status='busy'
+                """,
+                (now, assigned_worker),
+            )
+
         conn.commit()
+        if worker_db_exists:
+            conn.execute("DETACH DATABASE wr")
 
         updated_row = conn.execute(
             "SELECT * FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         return _ok(success=True, task=_task_from_row(updated_row))
+    except Exception:
+        try:
+            conn.rollback()
+            conn.execute("DETACH DATABASE wr")
+        except Exception:
+            pass
+        raise
     finally:
         conn.close()
 
@@ -478,7 +529,17 @@ def tq_fail_stale_tasks(timeout_seconds: int) -> str:
 
         if rows:
             stale_ids = [row["id"] for row in rows]
+            stale_workers = {
+                row["id"]: row["assigned_worker"]
+                for row in rows
+                if row["assigned_worker"]
+            }
             now = _utc_now()
+
+            worker_db_exists = os.path.exists(WORKER_REGISTRY_DB)
+            if worker_db_exists:
+                conn.execute(f"ATTACH DATABASE ? AS wr", (WORKER_REGISTRY_DB,))
+
             conn.executemany(
                 """
                 UPDATE tasks SET status='failed', error='Task timed out',
@@ -487,7 +548,20 @@ def tq_fail_stale_tasks(timeout_seconds: int) -> str:
                 """,
                 [(now, tid) for tid in stale_ids],
             )
+
+            if worker_db_exists and stale_workers:
+                for tid, wid in stale_workers.items():
+                    conn.execute(
+                        """
+                        UPDATE wr.workers SET status='ready', last_status_change=?
+                        WHERE worker_id=? AND status='busy'
+                        """,
+                        (now, wid),
+                    )
+
             conn.commit()
+            if worker_db_exists:
+                conn.execute("DETACH DATABASE wr")
 
         stale_tasks = [_task_from_row(row) for row in rows]
         return _ok(
