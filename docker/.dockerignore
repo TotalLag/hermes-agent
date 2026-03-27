@@ -1,0 +1,62 @@
+# =============================================================================
+# Docker Build Ignores
+# =============================================================================
+# Exclude files that shouldn't be copied into the container for security
+# and size reasons.
+
+# Python
+*.pyc
+*.pyo
+__pycache__
+*.pyd
+.Python
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Documentation (not needed in container)
+docs/
+website/
+*.md
+!README.md
+
+# Logs
+*.log
+logs/
+
+# Environment and secrets
+.env
+.env.*
+*.env
+secrets/
+credentials/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local development
+tests/
+examples/
+sample*

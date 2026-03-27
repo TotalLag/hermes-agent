@@ -28,6 +28,7 @@ Skills for managing Hermes agents as distributed workers via Matrix direct messa
 | `task-protocol` | Natural language task protocol with `//task-assign` and `//task-result` markers |
 | `task-dispatch` | Task dispatch from Manager to workers |
 | `matrix-integration` | Matrix DM handling for Manager-Worker comms |
+| `stale-cleanup` | Periodic cleanup of stale workers and tasks (cron scheduled) |
 
 ## Timing
 

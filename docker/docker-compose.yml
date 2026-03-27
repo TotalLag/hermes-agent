@@ -73,6 +73,12 @@ services:
       dockerfile: docker/Dockerfile.manager
     container_name: hermes-manager
     hostname: hermes-manager
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     environment:
       # Matrix
       MATRIX_HOMESERVER: "http://synapse:8008"
@@ -121,6 +127,12 @@ services:
       dockerfile: docker/Dockerfile.worker
     container_name: hermes-worker-1
     hostname: hermes-worker-1
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     environment:
       # Matrix
       MATRIX_HOMESERVER: "http://synapse:8008"
@@ -143,20 +155,19 @@ services:
       HICLAW_MINIO_SECURE: "false"
       # Registration
       HICLAW_REGISTRATION_TOKEN: "${HICLAW_REGISTRATION_TOKEN:-changeme}"
-      # Docker
-      DOCKER_HOST: "unix:///var/run/docker.sock"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - worker-data:/root/.hermes
+      - worker-data:/hermes/.hermes
     depends_on:
       minio:
         condition: service_healthy
       synapse:
         condition: service_healthy
       hermes-manager:
-        condition: service_started
+        condition: service_healthy
     networks:
       - hiclaw-net
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   minio-data:

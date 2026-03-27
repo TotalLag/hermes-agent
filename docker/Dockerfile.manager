@@ -30,9 +30,30 @@
 
 FROM python:3.11-slim
 
+# =============================================================================
+# Security Hardening Notes
+# =============================================================================
+# This container MUST run as root to access the Docker socket for worker management.
+# The manager spawns/stops worker containers via Docker API, requiring root privileges.
+#
+# SECURITY TRADE-OFF: Non-root users cannot bind-mount or access the Docker socket
+# with sufficient privileges to create containers. The Docker daemon runs as root,
+# and worker creation requires root-like capabilities (CAP_DAC_OVERRIDE, CAP_SYS_ADMIN).
+#
+# MITIGATIONS APPLIED:
+#   - No-new-privileges set in docker-compose.yml
+#   - Capabilities dropped to minimum (just CAP_NET_RAW for diagnostics if needed)
+#   - Read-only filesystem with tmpfs mounts for runtime state
+#   - Security labels applied
+# =============================================================================
+
 # Labels for container metadata
 LABEL com.hiclaw.role=manager
 LABEL com.hiclaw.version=${HICLAW_VERSION:-dev}
+LABEL com.hiclaw.secure="true"
+LABEL org.opencontainers.image.documentation="https://github.com/NousResearch/hermes-agent/blob/main/docs/deployment.md"
+LABEL org.opencontainers.image.source="https://github.com/NousResearch/hermes-agent"
+LABEL org.opencontainers.image.licenses="MIT"
 
 # Resource limits (enforced by container runtime via --memory and --cpus)
 ENV HERMES_MEMORY_LIMIT=${HERMES_MEMORY_LIMIT:-}
@@ -82,8 +103,19 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -sf http://localhost:8000/health || exit 1
 
-# Run as root to access Docker socket for worker management
-# The manager needs to spawn and monitor worker containers
+# =============================================================================
+# USER Directive - SECURITY TRADE-OFF
+# =============================================================================
+# The manager MUST run as root to access the Docker socket for worker management.
+# Docker socket access requires root privileges to create containers.
+#
+# IMPACT: If compromised, attacker has root access within container.
+# MITIGATION: 
+#   - Docker socket is read-only mounted when possible
+#   - No-new-privileges:true prevents privilege escalation via setuid binaries
+#   - Capabilities dropped to minimum in docker-compose.prod.yml
+#   - Manager has no external network access beyond configured Matrix/MinIO endpoints
+# =============================================================================
 USER root
 
 # Wrapper script to enforce resource limits

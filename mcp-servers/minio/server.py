@@ -482,10 +482,14 @@ def handle_tool_call(tool_name: str, arguments: dict) -> str:
 
 
 if __name__ == "__main__":
-    # Simple stdio server for testing
-    import sys
+    try:
+        from gateway.hiclaw.logging_config import setup_mcp_logging
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+        setup_mcp_logging(__name__)
+    except ImportError:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    import sys
 
     for line in sys.stdin:
         line = line.strip()

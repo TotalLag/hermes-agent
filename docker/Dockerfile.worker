@@ -28,9 +28,31 @@
 
 FROM python:3.11-slim
 
+# =============================================================================
+# Security Hardening Notes
+# =============================================================================
+# Workers run as NON-ROOT user (hermes) for improved security.
+# Workers do NOT need Docker socket access - they ARE the containers spawned by manager.
+#
+# SECURITY BENEFITS:
+#   - Non-root user limits damage if container is compromised
+#   - No Docker socket access needed (workers don't create containers, they run IN them)
+#   - Read-only filesystem with tmpfs mounts for runtime state
+#   - Capabilities dropped to ALL in docker-compose.prod.yml
+#
+# RUNTIME REQUIREMENTS:
+#   - tmpfs mount at /tmp for temporary files
+#   - tmpfs mount at /var/run for runtime state
+#   - Read-only root filesystem (except mounted volumes)
+# =============================================================================
+
 # Labels for container metadata
 LABEL com.hiclaw.role=worker
 LABEL com.hiclaw.version=${HICLAW_VERSION:-dev}
+LABEL com.hiclaw.secure="true"
+LABEL org.opencontainers.image.documentation="https://github.com/NousResearch/hermes-agent/blob/main/docs/deployment.md"
+LABEL org.opencontainers.image.source="https://github.com/NousResearch/hermes-agent"
+LABEL org.opencontainers.image.licenses="MIT"
 
 # Worker data directory for persistence
 ENV WORKER_DATA_DIR=/root/.hermes
@@ -65,8 +87,16 @@ RUN uv pip install --no-cache-dir \
 COPY . /app
 RUN uv pip install --no-cache-dir -e /app
 
-# Create hermes home directory
-RUN mkdir -p /root/.hermes
+# Create hermes home directory and non-root user for security
+# Workers run as non-root since they don't need Docker socket access
+RUN mkdir -p /root/.hermes && \
+    groupadd -r hermes --gid=1000 && \
+    useradd -r -g hermes --uid=1000 -d /hermes -s /bin/bash hermes && \
+    mkdir -p /hermes/.hermes && \
+    chown -R hermes:hermes /hermes
+
+# Grant hermes ownership of /app for source code and /opt for venv
+RUN chown -R hermes:hermes /app /opt/hermes-env
 
 # Health check: worker should respond to Matrix DMs
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
@@ -76,4 +106,13 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 # Wrapper script for graceful shutdown handling
 COPY docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint.sh
 RUN chmod +x /usr/local/bin/worker-entrypoint.sh
+
+# =============================================================================
+# USER Directive - NON-ROOT for Security
+# =============================================================================
+# Workers run as non-root user 'hermes' (UID 1000) for improved security.
+# Workers do NOT need Docker socket access - they ARE the containers spawned by manager.
+# =============================================================================
+USER hermes
+
 CMD ["/usr/local/bin/worker-entrypoint.sh"]

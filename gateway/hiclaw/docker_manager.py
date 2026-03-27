@@ -12,7 +12,20 @@ from typing import Dict, List, Optional
 import docker
 from docker.errors import APIError, NotFound
 
+from .circuit_breaker import CircuitOpenError, get_docker_circuit_breaker
+
 logger = logging.getLogger(__name__)
+
+
+def _get_metrics():
+    """Lazy import to avoid circular dependencies."""
+    try:
+        from gateway.hiclaw.metrics import metrics
+
+        return metrics
+    except ImportError:
+        return None
+
 
 WORKER_IMAGE = os.getenv("HICLAW_WORKER_IMAGE", "hermes-worker:latest")
 MANAGER_CONTAINER_NAME = "hermes-manager"
@@ -116,7 +129,9 @@ class DockerManager:
         env = {k: str(v) for k, v in env.items()}
 
         try:
-            container = self._client.containers.run(
+            cb = get_docker_circuit_breaker()
+            container = cb.call(
+                self._client.containers.run,
                 image=self._worker_image,
                 name=container_name,
                 detach=True,
@@ -131,7 +146,12 @@ class DockerManager:
                 container_name,
                 container.id[:12],
             )
+            m = _get_metrics()
+            if m:
+                m.record_worker_created()
             return self._container_to_worker(container)
+        except CircuitOpenError:
+            raise
         except APIError as e:
             logger.error("DockerManager: failed to launch %s: %s", container_name, e)
             raise
@@ -140,14 +160,17 @@ class DockerManager:
         """Gracefully stop a hermes-worker-{worker_name} container."""
         container_name = f"{WORKER_CONTAINER_PREFIX}{worker_name}"
         try:
-            self._client.containers.get(container_name).stop(timeout=timeout)
+            cb = get_docker_circuit_breaker()
+            cb.call(self._client.containers.get, container_name).stop(timeout=timeout)
             logger.info("DockerManager: stopped %s", container_name)
             return True
+        except CircuitOpenError:
+            raise
         except NotFound:
             return False
         except APIError as e:
             logger.error("DockerManager: failed to stop %s: %s", container_name, e)
-            return False
+            raise
 
     def remove_worker(self, worker_name: str, force: bool = False) -> bool:
         """Remove a hermes-worker-{worker_name} container."""
@@ -155,6 +178,9 @@ class DockerManager:
         try:
             self._client.containers.get(container_name).remove(force=force)
             logger.info("DockerManager: removed %s", container_name)
+            m = _get_metrics()
+            if m:
+                m.record_worker_destroyed()
             return True
         except NotFound:
             return False

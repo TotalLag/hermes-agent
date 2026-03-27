@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in __import__("sys").path:
 
 from gateway.hiclaw.docker_manager import (
     DockerManager,
+    NotFound,
     WorkerContainer,
     ContainerStatus,
 )
@@ -27,7 +28,9 @@ def docker_manager(mock_docker_client):
         "gateway.hiclaw.docker_manager.docker.DockerClient",
         return_value=mock_docker_client,
     ):
-        yield DockerManager()
+        dm = DockerManager()
+        dm._client = mock_docker_client
+        yield dm
 
 
 def make_mock_container(name, status="running", worker_id="abc123"):
@@ -112,8 +115,6 @@ class TestScalingDown:
         mock_container.stop.assert_called_once()
 
     def test_stop_worker_not_found(self, docker_manager, mock_docker_client):
-        from docker.errors import NotFound
-
         mock_docker_client.containers.get.side_effect = NotFound("not found")
 
         result = docker_manager.stop_worker("nonexistent")
@@ -190,8 +191,6 @@ class TestScalingListWorkers:
         assert result.name == "hermes-worker-1"
 
     def test_get_worker_not_found(self, docker_manager, mock_docker_client):
-        from docker.errors import NotFound
-
         mock_docker_client.containers.get.side_effect = NotFound("not found")
 
         result = docker_manager.get_worker("nonexistent")

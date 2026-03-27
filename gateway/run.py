@@ -453,6 +453,17 @@ class GatewayRunner:
             except Exception as e:
                 logger.warning("Failed to initialize HiclawManager: %s", e)
 
+        self._metrics_server = None
+        metrics_port = int(os.getenv("HICLAW_METRICS_PORT", "9090"))
+        if os.getenv("HICLAW_METRICS_ENABLED", "true").lower() in ("1", "true", "yes"):
+            try:
+                from gateway.hiclaw.metrics import MetricsServer
+
+                self._metrics_server = MetricsServer(port=metrics_port)
+                logger.info("MetricsServer configured on port %s", metrics_port)
+            except Exception as e:
+                logger.warning("Failed to initialize MetricsServer: %s", e)
+
     def _get_or_create_gateway_honcho(self, session_key: str):
         """Return a persistent Honcho manager/config pair for this gateway session."""
         if not hasattr(self, "_honcho_managers"):
@@ -778,6 +789,14 @@ class GatewayRunner:
                     "%s queued for background reconnection",
                     adapter.platform.value,
                 )
+                if adapter.platform == Platform.MATRIX:
+                    from gateway.hiclaw.reconnection import (
+                        start_matrix_reconnection,
+                        stop_matrix_reconnection,
+                    )
+
+                    stop_matrix_reconnection()
+                    start_matrix_reconnection(self, platform_config)
 
         if not self.adapters and not self._failed_platforms:
             self._exit_reason = (
@@ -1112,25 +1131,47 @@ class GatewayRunner:
                                 "attempts": 1,
                                 "next_retry": time.monotonic() + 30,
                             }
+                            if platform == Platform.MATRIX:
+                                from gateway.hiclaw.reconnection import (
+                                    start_matrix_reconnection,
+                                    stop_matrix_reconnection,
+                                )
+
+                                stop_matrix_reconnection()
+                                start_matrix_reconnection(self, platform_config)
                     else:
                         startup_retryable_errors.append(
                             f"{platform.value}: failed to connect"
                         )
-                        # No fatal error info means likely a transient issue — queue for retry
                         self._failed_platforms[platform] = {
                             "config": platform_config,
                             "attempts": 1,
                             "next_retry": time.monotonic() + 30,
                         }
+                        if platform == Platform.MATRIX:
+                            from gateway.hiclaw.reconnection import (
+                                start_matrix_reconnection,
+                                stop_matrix_reconnection,
+                            )
+
+                            stop_matrix_reconnection()
+                            start_matrix_reconnection(self, platform_config)
             except Exception as e:
                 logger.error("✗ %s error: %s", platform.value, e)
                 startup_retryable_errors.append(f"{platform.value}: {e}")
-                # Unexpected exceptions are typically transient — queue for retry
                 self._failed_platforms[platform] = {
                     "config": platform_config,
                     "attempts": 1,
                     "next_retry": time.monotonic() + 30,
                 }
+                if platform == Platform.MATRIX:
+                    from gateway.hiclaw.reconnection import (
+                        start_matrix_reconnection,
+                        stop_matrix_reconnection,
+                    )
+
+                    stop_matrix_reconnection()
+                    start_matrix_reconnection(self, platform_config)
 
         if connected_count == 0:
             if startup_nonretryable_errors:
@@ -1245,6 +1286,13 @@ class GatewayRunner:
                 self._hiclaw_manager.start()
             )
             logger.info("HiclawManager started")
+
+        if self._metrics_server is not None:
+            try:
+                await self._metrics_server.start()
+                logger.info("MetricsServer started")
+            except Exception as e:
+                logger.warning("Failed to start MetricsServer: %s", e)
 
         logger.info("Press Ctrl+C to stop")
 
@@ -1415,6 +1463,13 @@ class GatewayRunner:
         if self._hiclaw_manager is not None and self._hiclaw_manager_task is not None:
             await self._hiclaw_manager.stop()
             self._hiclaw_manager_task = None
+
+        if self._metrics_server is not None and self._metrics_server.is_running:
+            await self._metrics_server.stop()
+
+        from gateway.hiclaw.reconnection import stop_matrix_reconnection
+
+        stop_matrix_reconnection()
 
         for session_key, agent in list(self._running_agents.items()):
             if agent is _AGENT_PENDING_SENTINEL:
@@ -6325,33 +6380,10 @@ async def start_gateway(
     except Exception:
         pass
 
-    # Configure rotating file log so gateway output is persisted for debugging
-    log_dir = _hermes_home / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    file_handler = RotatingFileHandler(
-        log_dir / "gateway.log",
-        maxBytes=5 * 1024 * 1024,
-        backupCount=3,
-    )
-    from agent.redact import RedactingFormatter
+    # Configure structured JSON logging with stdout + optional file output
+    from gateway.hiclaw.logging_config import setup_logging
 
-    file_handler.setFormatter(
-        RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
-    logging.getLogger().addHandler(file_handler)
-    logging.getLogger().setLevel(logging.INFO)
-
-    # Separate errors-only log for easy debugging
-    error_handler = RotatingFileHandler(
-        log_dir / "errors.log",
-        maxBytes=2 * 1024 * 1024,
-        backupCount=2,
-    )
-    error_handler.setLevel(logging.WARNING)
-    error_handler.setFormatter(
-        RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
-    logging.getLogger().addHandler(error_handler)
+    setup_logging(log_file=str(_hermes_home / "logs" / "gateway.log"), propagate=False)
 
     runner = GatewayRunner(config)
 

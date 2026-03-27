@@ -16,9 +16,133 @@ import logging
 import os
 import sys
 import signal
-from typing import Any, Dict, Optional
+import threading
+import time
+from enum import Enum
+from functools import wraps
+from typing import Any, Callable, Dict, Optional, Tuple
 
 _client: Optional[docker.DockerClient] = None
+
+
+class CircuitState(Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class CircuitOpenError(Exception):
+    def __init__(
+        self, message: str = "Circuit breaker open, Docker operations suspended"
+    ):
+        self.message = message
+        super().__init__(self.message)
+
+
+class CircuitBreaker:
+    def __init__(
+        self,
+        name: str,
+        failure_threshold: int = 3,
+        failure_window: float = 300.0,
+        cooldown_timeout: float = 300.0,
+    ):
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.failure_window = failure_window
+        self.cooldown_timeout = cooldown_timeout
+        self._state = CircuitState.CLOSED
+        self._failure_count = 0
+        self._failure_timestamps: list[float] = []
+        self._last_failure_time: Optional[float] = None
+        self._lock = threading.RLock()
+
+    @property
+    def state(self) -> CircuitState:
+        with self._lock:
+            self._check_transitions()
+            return self._state
+
+    def _check_transitions(self) -> None:
+        if self._state == CircuitState.OPEN:
+            if self._last_failure_time is not None:
+                if time.time() - self._last_failure_time >= self.cooldown_timeout:
+                    logging.warning(
+                        "Circuit breaker '%s' transitioning OPEN -> HALF_OPEN",
+                        self.name,
+                    )
+                    self._state = CircuitState.HALF_OPEN
+                    self._failure_count = 0
+                    self._failure_timestamps = []
+
+    def _record_failure(self) -> None:
+        now = time.time()
+        self._failure_timestamps.append(now)
+        self._last_failure_time = now
+        cutoff = now - self.failure_window
+        self._failure_timestamps = [t for t in self._failure_timestamps if t > cutoff]
+        self._failure_count = len(self._failure_timestamps)
+        if self._failure_count >= self.failure_threshold:
+            if self._state == CircuitState.CLOSED:
+                logging.warning(
+                    "Circuit breaker '%s' transitioning CLOSED -> OPEN "
+                    "(%d failures in %.0f seconds)",
+                    self.name,
+                    self._failure_count,
+                    self.failure_window,
+                )
+                self._state = CircuitState.OPEN
+
+    def _record_success(self) -> None:
+        if self._state == CircuitState.HALF_OPEN:
+            logging.info(
+                "Circuit breaker '%s' transitioning HALF_OPEN -> CLOSED, Docker operations resumed",
+                self.name,
+            )
+            self._state = CircuitState.CLOSED
+            self._failure_count = 0
+            self._failure_timestamps = []
+            self._last_failure_time = None
+
+    def call(self, func: Callable[..., Any], *args, **kwargs) -> Any:
+        with self._lock:
+            self._check_transitions()
+            if self._state == CircuitState.OPEN:
+                logging.error(
+                    "Circuit breaker '%s' is OPEN - rejecting call to %s",
+                    self.name,
+                    func.__name__,
+                )
+                raise CircuitOpenError()
+        try:
+            result = func(*args, **kwargs)
+            with self._lock:
+                self._record_success()
+            return result
+        except Exception as e:
+            with self._lock:
+                self._record_failure()
+                if self._state == CircuitState.OPEN:
+                    logging.warning(
+                        "Circuit breaker '%s' is now OPEN after failure", self.name
+                    )
+            raise
+
+
+_docker_circuit_breaker: Optional[CircuitBreaker] = None
+
+
+def get_docker_circuit_breaker() -> CircuitBreaker:
+    global _docker_circuit_breaker
+    if _docker_circuit_breaker is None:
+        _docker_circuit_breaker = CircuitBreaker(
+            name="docker_manager",
+            failure_threshold=3,
+            failure_window=300.0,
+            cooldown_timeout=300.0,
+        )
+    return _docker_circuit_breaker
+
 
 DEFAULT_WORKER_IMAGE = os.environ.get("HICLAW_WORKER_IMAGE", "hermes-worker:latest")
 MANAGER_CONTAINER_NAME = "hermes-manager"
@@ -138,7 +262,9 @@ def handle_docker_create_worker(arguments: Dict[str, Any]) -> str:
             logging.warning(f"Image {image} not found, pulling...")
             client.images.pull(image)
 
-        container = client.containers.run(
+        cb = get_docker_circuit_breaker()
+        container = cb.call(
+            client.containers.run,
             image=image,
             name=full_name,
             detach=True,
@@ -154,6 +280,10 @@ def handle_docker_create_worker(arguments: Dict[str, Any]) -> str:
             }
         )
 
+    except CircuitOpenError:
+        return json.dumps(
+            {"error": "Circuit breaker open, Docker operations suspended"}
+        )
     except DockerException as e:
         return json.dumps({"error": f"Failed to create container: {e}"})
 
@@ -170,7 +300,8 @@ def handle_docker_remove_worker(arguments: Dict[str, Any]) -> str:
     client = _get_client()
 
     try:
-        container = client.containers.get(full_name)
+        cb = get_docker_circuit_breaker()
+        container = cb.call(client.containers.get, full_name)
 
         if container.status == "running":
             container.stop(timeout=10)
@@ -184,6 +315,10 @@ def handle_docker_remove_worker(arguments: Dict[str, Any]) -> str:
             }
         )
 
+    except CircuitOpenError:
+        return json.dumps(
+            {"error": "Circuit breaker open, Docker operations suspended"}
+        )
     except NotFound:
         return json.dumps({"error": f"Container '{full_name}' not found"})
     except DockerException as e:
@@ -447,7 +582,12 @@ def write_json(obj: Dict[str, Any]) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    try:
+        from gateway.hiclaw.logging_config import setup_mcp_logging
+
+        setup_mcp_logging(__name__)
+    except ImportError:
+        logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
     _init_docker_client()
 

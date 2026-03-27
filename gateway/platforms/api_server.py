@@ -7,7 +7,9 @@ Exposes an HTTP server with endpoints:
 - GET  /v1/responses/{response_id} — Retrieve a stored response
 - DELETE /v1/responses/{response_id} — Delete a stored response
 - GET  /v1/models                  — lists hermes-agent as an available model
-- GET  /health                     — health check
+- GET  /health                     — combined health check (liveness + readiness)
+- GET  /health/live               — Kubernetes liveness probe
+- GET  /health/ready               — Kubernetes readiness probe
 
 Any OpenAI-compatible frontend (Open WebUI, LobeChat, LibreChat,
 AnythingLLM, NextChat, ChatBox, etc.) can connect to hermes-agent
@@ -37,6 +39,11 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.hiclaw.health import (
+    get_health_probe,
+    get_liveness_probe,
+    get_readiness_probe,
+)
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
@@ -546,6 +553,24 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response(response, status=503)
 
         return web.json_response(response)
+
+    async def _handle_health_live(self, request: "web.Request") -> "web.Response":
+        """GET /health/live — Kubernetes liveness probe."""
+        probe = get_liveness_probe()
+        result = probe.check()
+        response = result.to_dict()
+        if result.status == "ok":
+            return web.json_response(response)
+        return web.json_response(response, status=503)
+
+    async def _handle_health_ready(self, request: "web.Request") -> "web.Response":
+        """GET /health/ready — Kubernetes readiness probe."""
+        probe = get_readiness_probe()
+        result = probe.check()
+        response = result.to_dict()
+        if result.status == "ok":
+            return web.json_response(response)
+        return web.json_response(response, status=503)
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — return hermes-agent as an available model."""
@@ -1461,6 +1486,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app = web.Application(middlewares=mws)
             self._app["api_server_adapter"] = self
             self._app.router.add_get("/health", self._handle_health)
+            self._app.router.add_get("/health/live", self._handle_health_live)
+            self._app.router.add_get("/health/ready", self._handle_health_ready)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_post(
                 "/v1/chat/completions", self._handle_chat_completions

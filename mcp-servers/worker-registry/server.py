@@ -13,6 +13,16 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
+def _get_metrics():
+    try:
+        from gateway.hiclaw.metrics import metrics
+
+        return metrics
+    except ImportError:
+        return None
+
+
 REGISTRY_DIR = os.path.expanduser("~/.hermes/hiclaw/")
 REGISTRY_PATH = os.path.join(REGISTRY_DIR, "workers-registry.json")
 DB_PATH = os.path.join(REGISTRY_DIR, "workers-registry.db")
@@ -459,6 +469,12 @@ def wr_update_status(worker_id: str, status: str, message: str = "") -> str:
             ),
         )
         conn.commit()
+        m = _get_metrics()
+        if m:
+            if current_status != "ready" and normalized_status == "ready":
+                m.record_worker_ready()
+            elif current_status == "ready" and normalized_status != "ready":
+                m.record_worker_not_ready()
         return _ok(
             status="ok",
             worker_id=worker_id,
@@ -750,7 +766,12 @@ def write_json(obj):
 
 
 def main():
-    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    try:
+        from gateway.hiclaw.logging_config import setup_mcp_logging
+
+        setup_mcp_logging(__name__)
+    except ImportError:
+        logging.basicConfig(level=logging.WARNING, format="%(message)s")
     # Prime the DB connection (runs migration) at startup
     _get_db().close()
     while True:
