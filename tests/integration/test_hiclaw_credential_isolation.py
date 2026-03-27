@@ -172,33 +172,51 @@ class TestWorkersOnSeparateNetwork:
 class TestNoSecretsInEnvironment:
     """Secrets must be loaded via env_file, never as individual env vars with values."""
 
-    def test_workers_use_env_file_for_secrets(self):
-        """Workers must use env_file directive for secrets, not individual env vars."""
-        data = load_compose(COMPOSE_PROD_PATH)
-        services = data.get("services", {})
+    def test_workers_use_environment_vars_for_secrets(self):
+        """Workers must use environment: vars with ${VAR} substitution for secrets.
 
-        worker_services = [name for name in services if "worker" in name]
+        NOTE: env_file is NOT used in docker-compose.prod.yml for non-Swarm deployments
+        because env_file OVERWRITES environment: vars, blanking credentials at runtime.
+        Instead, secrets are injected via --env-file flag at docker-compose up time.
+        The Swarm path uses docker/hiclaw-secrets.docker-compose.yml with proper secrets.
+        """
+        # Check the base compose (where environment: vars are defined)
+        base_data = load_compose(COMPOSE_PATH)
+        base_services = base_data.get("services", {})
+
+        worker_services = [name for name in base_services if "worker" in name]
         assert len(worker_services) > 0, "No worker services found"
 
         for worker_name in worker_services:
-            worker_service = services[worker_name]
+            worker_service = base_services[worker_name]
 
-            # Must have env_file pointing to secrets
-            env_file = worker_service.get("env_file", [])
-            assert env_file is not None and len(env_file) > 0, (
-                f"Worker {worker_name} must have env_file configured for secrets"
-            )
-            env_file_strs = [
-                f if isinstance(f, str) else f.get("file", "") for f in env_file
-            ]
-            secrets_files = [f for f in env_file_strs if "secrets" in f]
-            assert len(secrets_files) > 0, (
-                f"Worker {worker_name} env_file must include secrets file, "
-                f"found: {env_file_strs}"
-            )
-
-            # Must NOT have individual secret env vars with actual values
             environment = worker_service.get("environment", {})
+            assert environment, f"Worker {worker_name} must have environment: vars"
+            # Verify ${VAR} substitution pattern for secrets
+            secret_var_names = [
+                "HICLAW_LLM_API_KEY",
+                "MATRIX_ACCESS_TOKEN",
+            ]
+            for var_name in secret_var_names:
+                val = environment.get(var_name, "")
+                assert "${" in val and "}" in val, (
+                    f"Worker {worker_name} environment:{var_name} must use ${{VAR}} "
+                    f"substitution, got: {val!r}"
+                )
+
+        prod_data = load_compose(COMPOSE_PROD_PATH)
+        prod_services = prod_data.get("services", {})
+
+        for worker_name in worker_services:
+            prod_service = prod_services.get(worker_name, {})
+            env_file = prod_service.get("env_file", [])
+            assert env_file is None or len(env_file) == 0, (
+                f"Worker {worker_name} must NOT have env_file in prod compose — "
+                "env_file overrides environment: vars and blanks credentials. "
+                "Use --env-file at runtime instead."
+            )
+
+            prod_env = prod_service.get("environment", {})
             secret_var_names = [
                 "HICLAW_LLM_API_KEY",
                 "HICLAW_MANAGER_ACCESS_TOKEN",
@@ -206,36 +224,50 @@ class TestNoSecretsInEnvironment:
                 "MATRIX_ACCESS_TOKEN",
             ]
             for var_name in secret_var_names:
-                assert var_name not in environment, (
+                assert var_name not in prod_env, (
                     f"Worker {worker_name} must not set {var_name} as individual "
-                    "environment variable — use env_file instead"
+                    "environment variable in prod compose"
                 )
 
-    def test_manager_uses_env_file_for_secrets(self):
-        """hermes-manager must use env_file for secrets, not individual env vars."""
-        data = load_compose(COMPOSE_PROD_PATH)
-        services = data.get("services", {})
+    def test_manager_uses_environment_vars_for_secrets(self):
+        """hermes-manager must use environment: vars with ${VAR} substitution for secrets.
 
-        manager_service = services.get("hermes-manager")
+        NOTE: env_file is NOT used in docker-compose.prod.yml for non-Swarm deployments
+        because env_file OVERWRITES environment: vars, blanking credentials at runtime.
+        Instead, secrets are injected via --env-file flag at docker-compose up time.
+        The Swarm path uses docker/hiclaw-secrets.docker-compose.yml with proper secrets.
+        """
+        # Check the base compose (where environment: vars are defined)
+        base_data = load_compose(COMPOSE_PATH)
+        base_services = base_data.get("services", {})
+
+        manager_service = base_services.get("hermes-manager")
         assert manager_service is not None, "hermes-manager not found"
 
-        env_file = manager_service.get("env_file", [])
-        assert env_file is not None and len(env_file) > 0, (
-            "hermes-manager must have env_file configured for secrets"
-        )
-
         environment = manager_service.get("environment", {})
+        assert environment, "hermes-manager must have environment: vars"
         secret_var_names = [
             "HICLAW_LLM_API_KEY",
-            "HICLAW_MANAGER_ACCESS_TOKEN",
-            "HICLAW_WORKER1_ACCESS_TOKEN",
             "MATRIX_ACCESS_TOKEN",
         ]
         for var_name in secret_var_names:
-            assert var_name not in environment, (
-                f"hermes-manager must not set {var_name} as individual "
-                "environment variable — use env_file instead"
+            val = environment.get(var_name, "")
+            assert "${" in val and "}" in val, (
+                f"hermes-manager environment:{var_name} must use ${{VAR}} "
+                f"substitution, got: {val!r}"
             )
+
+        # Prod compose must NOT have env_file (would blank the credentials)
+        prod_data = load_compose(COMPOSE_PROD_PATH)
+        prod_services = prod_data.get("services", {})
+
+        prod_manager = prod_services.get("hermes-manager", {})
+        env_file = prod_manager.get("env_file", [])
+        assert env_file is None or len(env_file) == 0, (
+            "hermes-manager must NOT have env_file in prod compose — "
+            "env_file overrides environment: vars and blanks credentials. "
+            "Use --env-file at runtime instead."
+        )
 
     def test_secrets_example_has_no_actual_values(self):
         """hiclaw-secrets.env.example must have empty values, never real secrets."""
@@ -258,7 +290,9 @@ class TestNoSecretsInEnvironment:
             )
 
             key = match.group(1)
-            value = match.group(2).strip()
+            raw_value = match.group(2).strip()
+            # Strip inline comments (e.g. "value  # REQUIRED - description")
+            value = raw_value.split("#")[0].strip()
 
             placeholder_indicators = [
                 "your-",
@@ -268,32 +302,12 @@ class TestNoSecretsInEnvironment:
                 "changeme",
                 "TODO",
                 "REPLACE",
+                "YOUR",  # YOUR_MATRIX_*, YOUR_MINIO_* patterns
+                "://",  # URL values (e.g. http://synapse:8008) — not secrets
             ]
             is_placeholder = any(
-                indicator in value.lower() for indicator in placeholder_indicators
-            )
-            is_empty = value == ""
-
-            assert is_placeholder or is_empty, (
-                f"Secret {key} in hiclaw-secrets.env.example must have empty value "
-                f"or placeholder text, got: {value!r}"
-            )
-
-            key = match.group(1)
-            value = match.group(2).strip()
-
-            # Values must be empty or contain obvious placeholder text
-            placeholder_indicators = [
-                "your-",
-                "example",
-                "placeholder",
-                "<",
-                "changeme",
-                "TODO",
-                "REPLACE",
-            ]
-            is_placeholder = any(
-                indicator in value.lower() for indicator in placeholder_indicators
+                indicator.lower() in value.lower()
+                for indicator in placeholder_indicators
             )
             is_empty = value == ""
 
