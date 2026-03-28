@@ -186,7 +186,7 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
     Official skills are always shown first, regardless of source filter.
     """
     from tools.skills_hub import (
-        GitHubAuth, create_source_router, OptionalSkillSource, SkillMeta,
+        GitHubAuth, create_source_router,
     )
 
     # Clamp page_size to safe range
@@ -357,7 +357,8 @@ def do_install(identifier: str, category: str = "", force: bool = False,
 
     # Scan
     c.print("[bold]Running security scan...[/]")
-    result = scan_skill(q_path, source=identifier)
+    scan_source = getattr(bundle, "identifier", "") or getattr(meta, "identifier", "") or identifier
+    result = scan_skill(q_path, source=scan_source)
     c.print(format_scan_report(result))
 
     # Check install policy
@@ -415,6 +416,13 @@ def do_install(identifier: str, category: str = "", force: bool = False,
     from tools.skills_hub import SKILLS_DIR
     c.print(f"[bold green]Installed:[/] {install_dir.relative_to(SKILLS_DIR)}")
     c.print(f"[dim]Files: {', '.join(bundle.files.keys())}[/]\n")
+
+    # Invalidate the skills prompt cache so the new skill appears immediately
+    try:
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+    except Exception:
+        pass
 
 
 def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
@@ -622,6 +630,11 @@ def do_uninstall(name: str, console: Optional[Console] = None,
     success, msg = uninstall_skill(name)
     if success:
         c.print(f"[bold green]{msg}[/]\n")
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
     else:
         c.print(f"[bold red]Error:[/] {msg}\n")
 

@@ -11,6 +11,7 @@ from agent.auxiliary_client import (
     get_text_auxiliary_client,
     get_vision_auxiliary_client,
     get_available_vision_backends,
+    resolve_vision_provider_client,
     resolve_provider_client,
     auxiliary_max_tokens_param,
     _read_codex_access_token,
@@ -307,9 +308,8 @@ class TestExpiredCodexFallback:
 
 
     def test_hermes_oauth_file_sets_oauth_flag(self, monkeypatch):
-        """Hermes OAuth credentials should get is_oauth=True (token is not sk-ant-api-*)."""
+        """OAuth-style tokens should get is_oauth=True (token is not sk-ant-api-*)."""
         # Mock resolve_anthropic_token to return an OAuth-style token
-        # (simulates what read_hermes_oauth_credentials would return)
         with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="hermes-oauth-jwt-token"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
@@ -462,7 +462,7 @@ class TestGetTextAuxiliaryClient:
              patch("agent.auxiliary_client.OpenAI") as mock_openai:
             mock_nous.return_value = {"access_token": "nous-tok"}
             client, model = get_text_auxiliary_client()
-        assert model == "gemini-3-flash"
+        assert model == "google/gemini-3-flash-preview"
 
     def test_custom_endpoint_over_codex(self, monkeypatch, codex_auth_dir):
         monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
@@ -639,6 +639,30 @@ class TestVisionClientFallback:
         assert client.__class__.__name__ == "AnthropicAuxiliaryClient"
         assert model == "claude-haiku-4-5-20251001"
 
+    def test_selected_codex_provider_short_circuits_vision_auto(self, monkeypatch):
+        def fake_load_config():
+            return {"model": {"provider": "openai-codex", "default": "gpt-5.2-codex"}}
+
+        codex_client = MagicMock()
+        with (
+            patch("hermes_cli.config.load_config", fake_load_config),
+            patch("agent.auxiliary_client._try_codex", return_value=(codex_client, "gpt-5.2-codex")) as mock_codex,
+            patch("agent.auxiliary_client._try_openrouter") as mock_openrouter,
+            patch("agent.auxiliary_client._try_nous") as mock_nous,
+            patch("agent.auxiliary_client._try_anthropic") as mock_anthropic,
+            patch("agent.auxiliary_client._try_custom_endpoint") as mock_custom,
+        ):
+            provider, client, model = resolve_vision_provider_client()
+
+        assert provider == "openai-codex"
+        assert client is codex_client
+        assert model == "gpt-5.2-codex"
+        mock_codex.assert_called_once()
+        mock_openrouter.assert_not_called()
+        mock_nous.assert_not_called()
+        mock_anthropic.assert_not_called()
+        mock_custom.assert_not_called()
+
     def test_vision_auto_includes_codex(self, codex_auth_dir):
         """Codex supports vision (gpt-5.3-codex), so auto mode should use it."""
         with patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
@@ -694,7 +718,7 @@ class TestVisionClientFallback:
              patch("agent.auxiliary_client.OpenAI"):
             mock_nous.return_value = {"access_token": "nous-tok"}
             client, model = get_vision_auxiliary_client()
-        assert model == "gemini-3-flash"
+        assert model == "google/gemini-3-flash-preview"
         assert client is not None
 
     def test_vision_forced_main_uses_custom_endpoint(self, monkeypatch):
@@ -790,7 +814,7 @@ class TestResolveForcedProvider:
              patch("agent.auxiliary_client.OpenAI"):
             mock_nous.return_value = {"access_token": "nous-tok"}
             client, model = _resolve_forced_provider("nous")
-        assert model == "gemini-3-flash"
+        assert model == "google/gemini-3-flash-preview"
         assert client is not None
 
     def test_forced_nous_not_configured(self, monkeypatch):

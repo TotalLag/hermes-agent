@@ -1,0 +1,170 @@
+# =============================================================================
+# HiClaw Production Docker Compose Override
+# =============================================================================
+# This file extends docker-compose.yml with production-grade settings.
+#
+# IMPORTANT - Production Configuration Required:
+#   1. DOCKER SWARM MODE: Use docker/hiclaw-secrets.docker-compose.yml instead
+#      - Run: docker swarm init
+#      - Run: ./docker/create-secrets.sh /path/to/secrets/
+#      - Deploy with: -f docker/hiclaw-secrets.docker-compose.yml
+#   2. NON-SWARM: Copy docker/hiclaw-secrets.env.example to docker/hiclaw-secrets.env
+#   3. Update Traefik labels with your actual domain
+#   4. Ensure hiclaw-prod-net exists: docker network create --driver overlay hiclaw-prod-net
+#
+# Usage (non-swarm - uses env_file):
+#   docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d
+#
+# Usage (Swarm mode - uses Docker secrets):
+#   docker swarm init
+#   ./docker/create-secrets.sh /path/to/secrets/
+#   docker-compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml -f docker/hiclaw-secrets.docker-compose.yml up
+#
+# NOTE: Docker secrets require Swarm mode. The env_file approach is the fallback
+#       for standalone Docker Compose deployments.
+#
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # MinIO — Production resource limits and logging
+  # ---------------------------------------------------------------------------
+  minio:
+    # Resource constraints for production
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    # Production restart policy
+    restart: unless-stopped
+    # Log rotation for production
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Network aliases for service discovery
+    networks:
+      - hiclaw-prod-net
+
+  # ---------------------------------------------------------------------------
+  # Synapse — Production resource limits and logging
+  # ---------------------------------------------------------------------------
+  synapse:
+    # Resource constraints for production
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    # Production restart policy
+    restart: unless-stopped
+    # Log rotation for production
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Network aliases for service discovery
+    networks:
+      - hiclaw-prod-net
+
+  # ---------------------------------------------------------------------------
+  # Hermes Manager — Production resource limits, restart, and hardening
+  # ---------------------------------------------------------------------------
+  hermes-manager:
+    # Resource constraints for production
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    # Production restart policy - ensures manager stays running
+    restart: unless-stopped
+    # Log rotation for production
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Healthcheck - wait for manager to be ready before workers start
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    # Network aliases for service discovery
+    networks:
+      - hiclaw-prod-net
+    # Swarm mode: add -f docker/hiclaw-secrets.docker-compose.yml to the deploy command
+    # to include secrets declarations. Non-swarm: use --env-file with a .env file.
+
+  # ---------------------------------------------------------------------------
+  # Hermes Worker — Production resource limits and restart policy
+  # ---------------------------------------------------------------------------
+  hermes-worker-1:
+    # Resource constraints for production
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+    # Production restart policy - restart on failure to recover worker
+    restart: on-failure
+    # Log rotation for production
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Healthcheck - verify worker is responding
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    # Network aliases for service discovery
+    networks:
+      - hiclaw-prod-net
+
+# =============================================================================
+# Networks
+# =============================================================================
+# Production overlay network for Docker Swarm.
+# For swarm deployment, create the network first:
+#   docker network create --driver overlay hiclaw-prod-net
+#
+# For local testing with docker-compose (not swarm), this will create a bridge network.
+# Workers are on the same network as manager to enable Matrix communication
+# via the synapse homeserver. Network aliases ensure service discovery works.
+#
+# Traefik Integration Note:
+#   For reverse proxy discovery, configure Traefik via docker labels on services
+#   OR use Traefik's file provider/CRD for swarm mode. The network labels below
+#   are defined at the network level for swarm compatibility.
+# =============================================================================
+networks:
+  hiclaw-prod-net:
+    driver: overlay
+    attachable: true
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.hiclaw.rule=Host(`hiclaw.example.com`)"
+      - "traefik.http.services.hiclaw.loadbalancer.server.port=8000"

@@ -92,6 +92,7 @@ You need at least one way to connect to an LLM. Use `hermes model` to switch pro
 | **Kilo Code** | `KILOCODE_API_KEY` in `~/.hermes/.env` (provider: `kilocode`) |
 | **OpenCode Zen** | `OPENCODE_ZEN_API_KEY` in `~/.hermes/.env` (provider: `opencode-zen`) |
 | **OpenCode Go** | `OPENCODE_GO_API_KEY` in `~/.hermes/.env` (provider: `opencode-go`) |
+| **Hugging Face** | `HF_TOKEN` in `~/.hermes/.env` (provider: `huggingface`, aliases: `hf`) |
 | **Custom Endpoint** | `hermes model` (saved in `config.yaml`) or `OPENAI_BASE_URL` + `OPENAI_API_KEY` in `~/.hermes/.env` |
 
 :::info Codex Note
@@ -223,6 +224,32 @@ model:
 ```
 
 Base URLs can be overridden with `GLM_BASE_URL`, `KIMI_BASE_URL`, `MINIMAX_BASE_URL`, `MINIMAX_CN_BASE_URL`, or `DASHSCOPE_BASE_URL` environment variables.
+
+### Hugging Face Inference Providers
+
+[Hugging Face Inference Providers](https://huggingface.co/docs/inference-providers) routes to 20+ open models through a unified OpenAI-compatible endpoint (`router.huggingface.co/v1`). Requests are automatically routed to the fastest available backend (Groq, Together, SambaNova, etc.) with automatic failover.
+
+```bash
+# Use any available model
+hermes chat --provider huggingface --model Qwen/Qwen3-235B-A22B-Thinking-2507
+# Requires: HF_TOKEN in ~/.hermes/.env
+
+# Short alias
+hermes chat --provider hf --model deepseek-ai/DeepSeek-V3.2
+```
+
+Or set it permanently in `config.yaml`:
+```yaml
+model:
+  provider: "huggingface"
+  default: "Qwen/Qwen3-235B-A22B-Thinking-2507"
+```
+
+Get your token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) — make sure to enable the "Make calls to Inference Providers" permission. Free tier included ($0.10/month credit, no markup on provider rates).
+
+You can append routing suffixes to model names: `:fastest` (default), `:cheapest`, or `:provider_name` to force a specific backend.
+
+The base URL can be overridden with `HF_BASE_URL`.
 
 ## Custom & Self-Hosted LLM Providers
 
@@ -627,7 +654,7 @@ fallback_model:
 
 When activated, the fallback swaps the model and provider mid-session without losing your conversation. It fires **at most once** per session.
 
-Supported providers: `openrouter`, `nous`, `openai-codex`, `copilot`, `anthropic`, `zai`, `kimi-coding`, `minimax`, `minimax-cn`, `custom`.
+Supported providers: `openrouter`, `nous`, `openai-codex`, `copilot`, `anthropic`, `huggingface`, `zai`, `kimi-coding`, `minimax`, `minimax-cn`, `custom`.
 
 :::tip
 Fallback is configured exclusively through `config.yaml` — there are no environment variables for it. For full details on when it triggers, supported providers, and how it interacts with auxiliary tasks and delegation, see [Fallback Providers](/docs/user-guide/features/fallback-providers).
@@ -1163,6 +1190,7 @@ This controls both the `text_to_speech` tool and spoken replies in voice mode (`
 ```yaml
 display:
   tool_progress: all      # off | new | all | verbose
+  tool_progress_command: false  # Enable /verbose slash command in messaging gateway
   skin: default           # Built-in or custom CLI skin (see user-guide/features/skins)
   theme_mode: auto        # auto | light | dark — color scheme for skin-aware rendering
   personality: "kawaii"  # Legacy cosmetic field still surfaced in some summaries
@@ -1193,6 +1221,8 @@ This works with any skin — built-in or custom. Skin authors can provide `color
 | `new` | Tool indicator only when the tool changes |
 | `all` | Every tool call with a short preview (default) |
 | `verbose` | Full args, results, and debug logs |
+
+In the CLI, cycle through these modes with `/verbose`. To use `/verbose` in messaging platforms (Telegram, Discord, Slack, etc.), set `tool_progress_command: true` in the `display` section above. The command will then cycle the mode and save to config.
 
 ## Privacy
 

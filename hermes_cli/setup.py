@@ -80,6 +80,11 @@ _DEFAULT_PROVIDER_MODELS = {
     "minimax-cn": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1"],
     "ai-gateway": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5", "google/gemini-3-flash"],
     "kilocode": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "google/gemini-3-pro-preview", "google/gemini-3-flash-preview"],
+    "huggingface": [
+        "Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3-235B-A22B-Thinking-2507",
+        "Qwen/Qwen3-Coder-480B-A35B-Instruct", "deepseek-ai/DeepSeek-R1-0528",
+        "deepseek-ai/DeepSeek-V3.2", "moonshotai/Kimi-K2.5",
+    ],
 }
 
 
@@ -283,7 +288,6 @@ from hermes_cli.config import (
     save_env_value,
     get_env_value,
     ensure_hermes_home,
-    DEFAULT_CONFIG,
 )
 
 from hermes_cli.colors import Colors, color
@@ -549,9 +553,9 @@ def _prompt_api_key(var: dict):
 
     if value:
         save_env_value(var["name"], value)
-        print_success(f"  ✓ Saved")
+        print_success("  ✓ Saved")
     else:
-        print_warning(f"  Skipped (configure later with 'hermes setup')")
+        print_warning("  Skipped (configure later with 'hermes setup')")
 
 
 def _print_setup_summary(config: dict, hermes_home):
@@ -726,9 +730,9 @@ def _print_setup_summary(config: dict, hermes_home):
         f"   {color('hermes config edit', Colors.GREEN)}    Open config in your editor"
     )
     print(f"   {color('hermes config set <key> <value>', Colors.GREEN)}")
-    print(f"                          Set a specific value")
+    print("                          Set a specific value")
     print()
-    print(f"   Or edit the files directly:")
+    print("   Or edit the files directly:")
     print(f"   {color(f'nano {get_config_path()}', Colors.DIM)}")
     print(f"   {color(f'nano {get_env_path()}', Colors.DIM)}")
     print()
@@ -756,13 +760,13 @@ def _prompt_container_resources(config: dict):
     print_info("  Persistent filesystem keeps files between sessions.")
     print_info("  Set to 'no' for ephemeral sandboxes that reset each time.")
     persist_str = prompt(
-        f"  Persist filesystem across sessions? (yes/no)", persist_label
+        "  Persist filesystem across sessions? (yes/no)", persist_label
     )
     terminal["container_persistent"] = persist_str.lower() in ("yes", "true", "y", "1")
 
     # CPU
     current_cpu = terminal.get("container_cpu", 1)
-    cpu_str = prompt(f"  CPU cores", str(current_cpu))
+    cpu_str = prompt("  CPU cores", str(current_cpu))
     try:
         terminal["container_cpu"] = float(cpu_str)
     except ValueError:
@@ -770,7 +774,7 @@ def _prompt_container_resources(config: dict):
 
     # Memory
     current_mem = terminal.get("container_memory", 5120)
-    mem_str = prompt(f"  Memory in MB (5120 = 5GB)", str(current_mem))
+    mem_str = prompt("  Memory in MB (5120 = 5GB)", str(current_mem))
     try:
         terminal["container_memory"] = int(mem_str)
     except ValueError:
@@ -778,7 +782,7 @@ def _prompt_container_resources(config: dict):
 
     # Disk
     current_disk = terminal.get("container_disk", 51200)
-    disk_str = prompt(f"  Disk in MB (51200 = 50GB)", str(current_disk))
+    disk_str = prompt("  Disk in MB (51200 = 50GB)", str(current_disk))
     try:
         terminal["container_disk"] = int(disk_str)
     except ValueError:
@@ -798,15 +802,11 @@ def setup_model_provider(config: dict):
     """Configure the inference provider and default model."""
     from hermes_cli.auth import (
         get_active_provider,
-        get_provider_auth_state,
         PROVIDER_REGISTRY,
-        format_auth_error,
-        AuthError,
         fetch_nous_models,
         resolve_nous_runtime_credentials,
         _update_config_for_provider,
         _login_openai_codex,
-        get_codex_auth_status,
         resolve_codex_runtime_credentials,
         DEFAULT_CODEX_BASE_URL,
         detect_external_credentials,
@@ -889,6 +889,7 @@ def setup_model_provider(config: dict):
         "OpenCode Go (open models, $10/month subscription)",
         "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)",
         "GitHub Copilot ACP (spawns `copilot --acp --stdio`)",
+        "Hugging Face Inference Providers (20+ open models)",
     ]
     if keep_label:
         provider_choices.append(keep_label)
@@ -975,7 +976,7 @@ def setup_model_provider(config: dict):
         print()
 
         try:
-            from hermes_cli.auth import _login_nous, ProviderConfig
+            from hermes_cli.auth import _login_nous
             import argparse
 
             mock_args = argparse.Namespace(
@@ -1533,7 +1534,26 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "copilot-acp", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    # else: provider_idx == 16 (Keep current) — only shown when a provider already exists
+    elif provider_idx == 16:  # Hugging Face Inference Providers
+        selected_provider = "huggingface"
+        print()
+        print_header("Hugging Face API Token")
+        pconfig = PROVIDER_REGISTRY["huggingface"]
+        print_info(f"Provider: {pconfig.name}")
+        print_info("Get your token at: https://huggingface.co/settings/tokens")
+        print_info("Required permission: 'Make calls to Inference Providers'")
+        print()
+
+        api_key = prompt("  HF Token", password=True)
+        if api_key:
+            save_env_value("HF_TOKEN", api_key)
+            # Clear OpenRouter env vars to prevent routing confusion
+            save_env_value("OPENAI_BASE_URL", "")
+            save_env_value("OPENAI_API_KEY", "")
+        _set_model_provider(config, "huggingface", pconfig.inference_base_url)
+        selected_base_url = pconfig.inference_base_url
+
+    # else: provider_idx == 17 (Keep current) — only shown when a provider already exists
     # Normalize "keep current" to an explicit provider so downstream logic
     # doesn't fall back to the generic OpenRouter/static-model path.
     if selected_provider is None:
@@ -2974,6 +2994,95 @@ def setup_tools(config: dict, first_install: bool = False):
 
 
 # =============================================================================
+# Post-Migration Section Skip Logic
+# =============================================================================
+
+
+def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]:
+    """Return a short summary if a setup section is already configured, else None.
+
+    Used after OpenClaw migration to detect which sections can be skipped.
+    ``get_env_value`` is the module-level import from hermes_cli.config
+    so that test patches on ``setup_mod.get_env_value`` take effect.
+    """
+    if section_key == "model":
+        has_key = bool(
+            get_env_value("OPENROUTER_API_KEY")
+            or get_env_value("OPENAI_API_KEY")
+            or get_env_value("ANTHROPIC_API_KEY")
+        )
+        if not has_key:
+            # Check for OAuth providers
+            try:
+                from hermes_cli.auth import get_active_provider
+                if get_active_provider():
+                    has_key = True
+            except Exception:
+                pass
+        if not has_key:
+            return None
+        model = config.get("model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+        if isinstance(model, dict):
+            return str(model.get("default") or model.get("model") or "configured")
+        return "configured"
+
+    elif section_key == "terminal":
+        backend = config.get("terminal", {}).get("backend", "local")
+        return f"backend: {backend}"
+
+    elif section_key == "agent":
+        max_turns = config.get("agent", {}).get("max_turns", 90)
+        return f"max turns: {max_turns}"
+
+    elif section_key == "gateway":
+        platforms = []
+        if get_env_value("TELEGRAM_BOT_TOKEN"):
+            platforms.append("Telegram")
+        if get_env_value("DISCORD_BOT_TOKEN"):
+            platforms.append("Discord")
+        if get_env_value("SLACK_BOT_TOKEN"):
+            platforms.append("Slack")
+        if get_env_value("WHATSAPP_PHONE_NUMBER_ID"):
+            platforms.append("WhatsApp")
+        if get_env_value("SIGNAL_ACCOUNT"):
+            platforms.append("Signal")
+        if platforms:
+            return ", ".join(platforms)
+        return None  # No platforms configured — section must run
+
+    elif section_key == "tools":
+        tools = []
+        if get_env_value("ELEVENLABS_API_KEY"):
+            tools.append("TTS/ElevenLabs")
+        if get_env_value("BROWSERBASE_API_KEY"):
+            tools.append("Browser")
+        if get_env_value("FIRECRAWL_API_KEY"):
+            tools.append("Firecrawl")
+        if tools:
+            return ", ".join(tools)
+        return None
+
+    return None
+
+
+def _skip_configured_section(
+    config: dict, section_key: str, label: str
+) -> bool:
+    """Show an already-configured section summary and offer to skip.
+
+    Returns True if the user chose to skip, False if the section should run.
+    """
+    summary = _get_section_config_summary(config, section_key)
+    if not summary:
+        return False
+    print()
+    print_success(f"  {label}: {summary}")
+    return not prompt_yes_no(f"  Reconfigure {label.lower()}?", default=False)
+
+
+# =============================================================================
 # OpenClaw Migration
 # =============================================================================
 
@@ -3044,7 +3153,7 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
             target_root=hermes_home.resolve(),
             execute=True,
             workspace_target=None,
-            overwrite=False,
+            overwrite=True,
             migrate_secrets=True,
             output_dir=None,
             selected_options=selected,
@@ -3106,6 +3215,10 @@ def run_setup_wizard(args):
       hermes setup tools     — just tool configuration
       hermes setup agent     — just agent settings
     """
+    from hermes_cli.config import is_managed, managed_error
+    if is_managed():
+        managed_error("run setup wizard")
+        return
     ensure_hermes_home()
 
     config = load_config()
@@ -3196,6 +3309,8 @@ def run_setup_wizard(args):
         )
     )
 
+    migration_ran = False
+
     if is_existing:
         # ── Returning User Menu ──
         print()
@@ -3235,12 +3350,17 @@ def run_setup_wizard(args):
             print_info("Exiting. Run 'hermes setup' again when ready.")
             return
         elif 3 <= choice <= 7:
-            # Individual section
-            section_idx = choice - 3
-            _, label, func = SETUP_SECTIONS[section_idx]
-            func(config)
-            save_config(config)
-            _print_setup_summary(config, hermes_home)
+            # Individual section — map by key, not by position.
+            # SETUP_SECTIONS includes TTS but the returning-user menu skips it,
+            # so positional indexing (choice - 3) would dispatch the wrong section.
+            _RETURNING_USER_SECTION_KEYS = ["model", "terminal", "gateway", "tools", "agent"]
+            section_key = _RETURNING_USER_SECTION_KEYS[choice - 3]
+            section = next((s for s in SETUP_SECTIONS if s[0] == section_key), None)
+            if section:
+                _, label, func = section
+                func(config)
+                save_config(config)
+                _print_setup_summary(config, hermes_home)
             return
     else:
         # ── First-Time Setup ──
@@ -3260,7 +3380,8 @@ def run_setup_wizard(args):
             return
 
         # Offer OpenClaw migration before configuration begins
-        if _offer_openclaw_migration(hermes_home):
+        migration_ran = _offer_openclaw_migration(hermes_home)
+        if migration_ran:
             # Reload config in case migration wrote to it
             config = load_config()
 
@@ -3273,20 +3394,31 @@ def run_setup_wizard(args):
     print()
     print_info("You can edit these files directly or use 'hermes config edit'")
 
+    if migration_ran:
+        print()
+        print_info("Settings were imported from OpenClaw.")
+        print_info("Each section below will show what was imported — press Enter to keep,")
+        print_info("or choose to reconfigure if needed.")
+
     # Section 1: Model & Provider
-    setup_model_provider(config)
+    if not (migration_ran and _skip_configured_section(config, "model", "Model & Provider")):
+        setup_model_provider(config)
 
     # Section 2: Terminal Backend
-    setup_terminal_backend(config)
+    if not (migration_ran and _skip_configured_section(config, "terminal", "Terminal Backend")):
+        setup_terminal_backend(config)
 
     # Section 3: Agent Settings
-    setup_agent_settings(config)
+    if not (migration_ran and _skip_configured_section(config, "agent", "Agent Settings")):
+        setup_agent_settings(config)
 
     # Section 4: Messaging Platforms
-    setup_gateway(config)
+    if not (migration_ran and _skip_configured_section(config, "gateway", "Messaging Platforms")):
+        setup_gateway(config)
 
     # Section 5: Tools
-    setup_tools(config, first_install=not is_existing)
+    if not (migration_ran and _skip_configured_section(config, "tools", "Tools")):
+        setup_tools(config, first_install=not is_existing)
 
     # Save and show summary
     save_config(config)
@@ -3299,7 +3431,6 @@ def _run_quick_setup(config: dict, hermes_home):
         get_missing_env_vars,
         get_missing_config_fields,
         check_config_version,
-        migrate_config,
     )
 
     print()
@@ -3438,9 +3569,9 @@ def _run_quick_setup(config: dict, hermes_home):
                     value = prompt(f"  {var.get('prompt', var['name'])}")
                 if value:
                     save_env_value(var["name"], value)
-                    print_success(f"  ✓ Saved")
+                    print_success("  ✓ Saved")
                 else:
-                    print_warning(f"  Skipped")
+                    print_warning("  Skipped")
                 print()
 
     # Handle missing config fields
