@@ -54,7 +54,7 @@ async def test_send_retries_without_reference_when_reply_target_is_system_messag
     sent_msg = SimpleNamespace(id=1234)
     send_calls = []
 
-    async def fake_send(*, content, reference=None):
+    async def fake_send(*, content, reference=None, suppress_embeds=False):
         send_calls.append({"content": content, "reference": reference})
         if len(send_calls) == 1:
             raise RuntimeError(
@@ -92,7 +92,7 @@ async def test_send_retries_without_reference_when_reply_target_is_deleted():
     sent_msgs = [SimpleNamespace(id=1001), SimpleNamespace(id=1002)]
     send_calls = []
 
-    async def fake_send(*, content, reference=None):
+    async def fake_send(*, content, reference=None, suppress_embeds=False):
         send_calls.append({"content": content, "reference": reference})
         if len(send_calls) == 1:
             raise RuntimeError(
@@ -135,7 +135,7 @@ async def test_send_does_not_retry_on_unrelated_errors():
     ref_msg = SimpleNamespace(id=99, to_reference=MagicMock(return_value=reference_obj))
     send_calls = []
 
-    async def fake_send(*, content, reference=None):
+    async def fake_send(*, content, reference=None, suppress_embeds=False):
         send_calls.append({"content": content, "reference": reference})
         raise RuntimeError(
             "403 Forbidden (error code: 50013): Missing Permissions"
@@ -158,6 +158,35 @@ async def test_send_does_not_retry_on_unrelated_errors():
     # Only the first attempt happens — no reference-retry replay.
     assert channel.send.await_count == 1
     assert send_calls[0]["reference"] is reference_obj
+
+
+@pytest.mark.asyncio
+async def test_send_suppresses_embeds_when_configured():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***", extra={"suppress_embeds": True}))
+
+    sent_msg = SimpleNamespace(id=4321)
+    send_calls = []
+
+    async def fake_send(*, content, reference=None, suppress_embeds=False):
+        send_calls.append({
+            "content": content,
+            "reference": reference,
+            "suppress_embeds": suppress_embeds,
+        })
+        return sent_msg
+
+    channel = SimpleNamespace(send=AsyncMock(side_effect=fake_send))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    result = await adapter.send("555", "keep this link https://example.com/source")
+
+    assert result.success is True
+    assert channel.send.await_count == 1
+    assert send_calls[0]["content"].endswith("https://example.com/source")
+    assert send_calls[0]["suppress_embeds"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -588,6 +588,11 @@ class DiscordAdapter(BasePlatformAdapter):
         # Reply threading mode: "off" (no replies), "first" (reply on first
         # chunk only, default), "all" (reply-reference on every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
+        suppress_embeds_value = self.config.extra.get(
+            "suppress_embeds",
+            self.config.extra.get("disable_link_previews", False),
+        )
+        self._suppress_embeds: bool = str(suppress_embeds_value).strip().lower() in {"1", "true", "yes", "on"}
         self._slash_commands: bool = self.config.extra.get("slash_commands", True)
         # In-memory cache of the bot's last message ID per channel, used by
         # history backfill to skip the full scan on hot paths.  Falls back to
@@ -1436,6 +1441,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     msg = await channel.send(
                         content=chunk,
                         reference=chunk_reference,
+                        suppress_embeds=self._suppress_embeds,
                     )
                 except Exception as e:
                     err_text = str(e)
@@ -1458,6 +1464,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         msg = await channel.send(
                             content=chunk,
                             reference=None,
+                            suppress_embeds=self._suppress_embeds,
                         )
                     else:
                         raise
@@ -1501,6 +1508,7 @@ class DiscordAdapter(BasePlatformAdapter):
             thread = await forum_channel.create_thread(
                 name=thread_name,
                 content=starter_content,
+                suppress_embeds=self._suppress_embeds,
             )
         except Exception as e:
             logger.error("[%s] Failed to create forum thread in %s: %s", self.name, forum_channel.id, e)
@@ -1517,7 +1525,7 @@ class DiscordAdapter(BasePlatformAdapter):
         warnings: list[str] = []
         for chunk in chunks[1:]:
             try:
-                msg = await thread_channel.send(content=chunk)
+                msg = await thread_channel.send(content=chunk, suppress_embeds=self._suppress_embeds)
                 message_ids.append(str(msg.id))
             except Exception as e:
                 warning = f"Failed to send follow-up chunk to forum thread {thread_id}: {e}"
@@ -1566,6 +1574,7 @@ class DiscordAdapter(BasePlatformAdapter):
         kwargs: Dict[str, Any] = {"name": thread_name}
         if content:
             kwargs["content"] = content
+            kwargs["suppress_embeds"] = self._suppress_embeds
         if file is not None:
             kwargs["file"] = file
         if files:
@@ -1612,7 +1621,7 @@ class DiscordAdapter(BasePlatformAdapter):
             formatted = self.format_message(content)
             if len(formatted) > self.MAX_MESSAGE_LENGTH:
                 formatted = formatted[:self.MAX_MESSAGE_LENGTH - 3] + "..."
-            await msg.edit(content=formatted)
+            await msg.edit(content=formatted, suppress=self._suppress_embeds)
             return SendResult(success=True, message_id=message_id)
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[%s] Failed to edit Discord message %s: %s", self.name, message_id, e, exc_info=True)
@@ -1648,7 +1657,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     content=(caption or "").strip(),
                     file=file,
                 )
-            msg = await channel.send(content=caption if caption else None, file=file)
+            msg = await channel.send(content=caption if caption else None, file=file, suppress_embeds=self._suppress_embeds)
         return SendResult(success=True, message_id=str(msg.id))
 
     async def send_multiple_images(
@@ -1764,7 +1773,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         files=files,
                     )
                 else:
-                    await channel.send(content=content, files=files)
+                    await channel.send(content=content, files=files, suppress_embeds=self._suppress_embeds)
             except Exception as e:
                 logger.warning(
                     "[%s] Multi-image Discord send failed (chunk %d/%d), falling back to per-image: %s",

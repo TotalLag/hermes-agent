@@ -973,6 +973,17 @@ def load_gateway_config() -> GatewayConfig:
                 if _discord_rtm is not None and not os.getenv("DISCORD_REPLY_TO_MODE"):
                     _rtm_str = "off" if _discord_rtm is False else str(_discord_rtm).lower()
                     os.environ["DISCORD_REPLY_TO_MODE"] = _rtm_str
+                for _discord_extra_key in ("suppress_embeds", "disable_link_previews"):
+                    if _discord_extra_key in discord_cfg:
+                        plat_data = platforms_data.setdefault(Platform.DISCORD.value, {})
+                        if not isinstance(plat_data, dict):
+                            plat_data = {}
+                            platforms_data[Platform.DISCORD.value] = plat_data
+                        extra = plat_data.setdefault("extra", {})
+                        if not isinstance(extra, dict):
+                            extra = {}
+                            plat_data["extra"] = extra
+                        extra[_discord_extra_key] = discord_cfg[_discord_extra_key]
 
             # Bridge top-level require_mention to Telegram when the telegram: section
             # does not already provide one.  Users often write "require_mention: true"
